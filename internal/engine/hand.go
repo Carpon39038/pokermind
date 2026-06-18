@@ -2,6 +2,20 @@ package engine
 
 import "math/rand"
 
+// Player 是引擎认识的玩家。实现者可以是 RuleBot、LLMPlayer 等。
+// 引擎只调用 Decide,不关心玩家是谁、怎么想。
+type Player interface {
+	Decide(obs Observation) Action
+}
+
+// playerFunc 把闭包适配为 Player。
+type playerFunc func(Observation) Action
+
+func (f playerFunc) Decide(obs Observation) Action { return f(obs) }
+
+// PlayerFromFunc 用闭包构造一个 Player。
+func PlayerFromFunc(f func(Observation) Action) Player { return playerFunc(f) }
+
 // Street 表示一手牌的阶段。
 type Street int8
 
@@ -53,11 +67,11 @@ type Config struct {
 	StartingStack int
 }
 
-// PlayerSeat 是一个座位。Decide 是外部注入的决策回调。
+// PlayerSeat 是一个座位。Player 是外部注入的决策接口。
 type PlayerSeat struct {
 	ID     int
 	Stack  int
-	Decide func(obs Observation) Action
+	Player Player
 }
 
 // Observation 是引擎给玩家的可见信息(不含对手底牌)。
@@ -285,7 +299,7 @@ func (st *handState) runStreet(events []Event) []Event {
 		}
 
 		obs := st.buildObservation(actor)
-		action := st.seats[actor].Decide(obs)
+		action := st.seats[actor].Player.Decide(obs)
 		_, ev := st.applyAction(actor, action)
 		events = append(events, ev)
 		acted[actor] = true

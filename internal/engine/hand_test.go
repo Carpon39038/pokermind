@@ -54,8 +54,8 @@ func alwaysCall() func(obs Observation) Action {
 
 func TestSetupHandBlinds(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, events := setupHand(seats, 0, cfg, makeRng(42), 1)
@@ -91,8 +91,8 @@ func TestSetupHandBlinds(t *testing.T) {
 
 func TestSetupHandButtonIsSB(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, _ := setupHand(seats, 1, cfg, makeRng(7), 1)
@@ -107,8 +107,8 @@ func TestSetupHandButtonIsSB(t *testing.T) {
 func TestSetupHandShortStackAllIn(t *testing.T) {
 	// 起始 stack 不足 SB,BB 应只投剩余全部
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 3, Decide: alwaysCall()},
-		{ID: 1, Stack: 10, Decide: alwaysCall()},
+		{ID: 0, Stack: 3, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 10, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 10}
 	st, events := setupHand(seats, 0, cfg, makeRng(1), 1)
@@ -123,8 +123,8 @@ func TestSetupHandShortStackAllIn(t *testing.T) {
 
 func TestFirstActor(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 
@@ -149,8 +149,8 @@ func TestFirstActor(t *testing.T) {
 
 func TestRunStreetPreflopBothCall(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
@@ -175,8 +175,8 @@ func TestRunStreetPreflopBothCall(t *testing.T) {
 
 func TestRunStreetFoldEndsStreet(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysFold()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysFold())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
@@ -194,8 +194,8 @@ func TestRunStreetFoldEndsStreet(t *testing.T) {
 
 func TestApplyActionRaiseToSemantics(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
@@ -216,8 +216,8 @@ func TestApplyActionRaiseToSemantics(t *testing.T) {
 
 func TestApplyActionRaiseBelowMinPanics(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
@@ -233,8 +233,8 @@ func TestApplyActionRaiseBelowMinPanics(t *testing.T) {
 func TestApplyActionRaiseAllInBelowMinAllowed(t *testing.T) {
 	// 短筹 all-in:即使 raise-to 低于 min,只要是把剩余 stack 全押上,允许
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	// 调整 SB 的 stack 到 14:已投 SB 5,剩 9。raise-to 14(all-in,< min 20)
@@ -253,8 +253,8 @@ func TestApplyActionRaiseAllInBelowMinAllowed(t *testing.T) {
 func TestApplyActionCallAllInTruncates(t *testing.T) {
 	// call 时筹码不足以匹配,只投剩余全部并 all-in
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
@@ -284,8 +284,8 @@ func raiseOnceThenCall(amt int) func(obs Observation) Action {
 
 func TestPlayHandFoldOnPreflop(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysFold()}, // SB 弃牌
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysFold())}, // SB 弃牌
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	events, result := PlayHand(seats, 0, cfg, makeRng(1), 1)
@@ -307,8 +307,8 @@ func TestPlayHandFoldOnPreflop(t *testing.T) {
 
 func TestPlayHandBothCallToShowdown(t *testing.T) {
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	events, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
@@ -352,8 +352,8 @@ func TestPlayHandBothCallToShowdown(t *testing.T) {
 func TestPlayHandRaisePreflopThenShowdown(t *testing.T) {
 	// SB raise-to 30,BB call,然后都 check 到摊牌
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: raiseOnceThenCall(30)},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(raiseOnceThenCall(30))},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	_, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
@@ -375,8 +375,8 @@ func TestPlayHandAllInRunsOutBoard(t *testing.T) {
 		return Action{Type: Call} // BB call(筹码刚好够:1000 - 10 = 990,需补 990,刚好)
 	}
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: sbDecide},
-		{ID: 1, Stack: 1000, Decide: bbDecide},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(sbDecide)},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(bbDecide)},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	events, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
@@ -403,8 +403,8 @@ func TestPlayHandChipsConserved(t *testing.T) {
 	// 筹码守恒:PlayHand 后两人 stack 之和应为 2000
 	// 验证 showdown 路径 pot=20(SB 投 10 + BB 投 10)
 	seats := [2]PlayerSeat{
-		{ID: 0, Stack: 1000, Decide: alwaysCall()},
-		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
 	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	_, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
