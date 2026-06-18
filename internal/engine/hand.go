@@ -114,5 +114,91 @@ type ShowdownInfo struct {
 	Ranks []HandRank // 每个 seat 的 HandRank
 }
 
-// 下面的引用让 go vet 不抱怨未使用的 import(后续任务会用到 rand)。
-var _ = rand.New
+// handState 是一手牌的内部可变状态。
+type handState struct {
+	cfg       Config
+	seats     [2]PlayerSeat
+	stacks    [2]int // 实时筹码(扣除已投入)
+	bets      [2]int // 本街已投入
+	hole      [2][]Card
+	community []Card
+	pot       int
+	street    Street
+	button    int // 按钮位 = SB 位
+	sb, bb    int // SB / BB 的 seat 索引
+	folded    [2]bool
+	allIn     [2]bool
+	handID    int
+	deck      *Deck
+}
+
+// setupHand 初始化一手牌:扣盲注、发底牌,返回内部状态与初始事件。
+// button=0 表示 seat0 是按钮(SB),button=1 表示 seat1 是按钮。
+func setupHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) (*handState, []Event) {
+	if button != 0 && button != 1 {
+		panic("setupHand: button must be 0 or 1")
+	}
+	if cfg.SmallBlind <= 0 || cfg.BigBlind <= cfg.SmallBlind {
+		panic("setupHand: invalid blinds")
+	}
+	if cfg.StartingStack < cfg.BigBlind {
+		panic("setupHand: starting stack smaller than big blind")
+	}
+
+	sb := button
+	bb := 1 - button
+
+	st := &handState{
+		cfg:    cfg,
+		button: button,
+		sb:     sb,
+		bb:     bb,
+		handID: handID,
+		street: Preflop,
+		deck:   NewDeck(WithRand(rng)),
+	}
+	st.seats[0] = seats[0]
+	st.seats[1] = seats[1]
+	st.stacks[0] = seats[0].Stack
+	st.stacks[1] = seats[1].Stack
+
+	var events []Event
+
+	sbAmt := postBlind(st, sb, cfg.SmallBlind)
+	events = append(events, Event{Type: BlindPosted, Seat: sb, Amount: sbAmt, Message: "small blind"})
+	bbAmt := postBlind(st, bb, cfg.BigBlind)
+	events = append(events, Event{Type: BlindPosted, Seat: bb, Amount: bbAmt, Message: "big blind"})
+
+	st.hole[0] = drawN(st.deck, 2)
+	st.hole[1] = drawN(st.deck, 2)
+	events = append(events, Event{Type: DealtHole, Seat: 0, Cards: st.hole[0]})
+	events = append(events, Event{Type: DealtHole, Seat: 1, Cards: st.hole[1]})
+
+	return st, events
+}
+
+// postBlind 从玩家 stack 投入盲注(最多投入 stack),返回实际投入额。
+// 若投入等于剩余 stack,标记 all-in。
+func postBlind(st *handState, seat, amount int) int {
+	if amount >= st.stacks[seat] {
+		amount = st.stacks[seat]
+		st.allIn[seat] = true
+	}
+	st.stacks[seat] -= amount
+	st.bets[seat] += amount
+	st.pot += amount
+	return amount
+}
+
+// drawN 从牌堆抽 n 张。
+func drawN(d *Deck, n int) []Card {
+	out := make([]Card, 0, n)
+	for i := 0; i < n; i++ {
+		c, ok := d.Draw()
+		if !ok {
+			panic("drawN: deck exhausted")
+		}
+		out = append(out, c)
+	}
+	return out
+}

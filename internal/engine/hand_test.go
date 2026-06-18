@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"math/rand"
+	"testing"
+)
 
 func TestStreetString(t *testing.T) {
 	cases := []struct {
@@ -33,5 +36,87 @@ func TestActionTypeString(t *testing.T) {
 		if got := tc.a.String(); got != tc.want {
 			t.Errorf("%v.String() = %q, want %q", tc.a, got, tc.want)
 		}
+	}
+}
+
+// makeRng 返回固定 seed 的 *rand.Rand,便于复现。
+func makeRng(seed int) *rand.Rand { return rand.New(rand.NewSource(int64(seed))) }
+
+// alwaysFold 总是弃牌。
+func alwaysFold() func(obs Observation) Action {
+	return func(obs Observation) Action { return Action{Type: Fold} }
+}
+
+// alwaysCall 总是跟注/check。
+func alwaysCall() func(obs Observation) Action {
+	return func(obs Observation) Action { return Action{Type: Call} }
+}
+
+func TestSetupHandBlinds(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, events := setupHand(seats, 0, cfg, makeRng(42), 1)
+
+	if st.stacks[0] != 995 {
+		t.Fatalf("SB stack = %d, want 995", st.stacks[0])
+	}
+	if st.stacks[1] != 990 {
+		t.Fatalf("BB stack = %d, want 990", st.stacks[1])
+	}
+	if st.pot != 15 {
+		t.Fatalf("pot = %d, want 15", st.pot)
+	}
+	if st.bets[0] != 5 || st.bets[1] != 10 {
+		t.Fatalf("bets = %v, want [5 10]", st.bets)
+	}
+	if len(events) != 4 {
+		t.Fatalf("events count = %d, want 4", len(events))
+	}
+	if events[0].Type != BlindPosted || events[0].Seat != 0 || events[0].Amount != 5 {
+		t.Fatalf("event[0] = %+v, want BlindPosted seat0 amt5", events[0])
+	}
+	if events[1].Type != BlindPosted || events[1].Seat != 1 || events[1].Amount != 10 {
+		t.Fatalf("event[1] = %+v, want BlindPosted seat1 amt10", events[1])
+	}
+	if len(st.hole[0]) != 2 || len(st.hole[1]) != 2 {
+		t.Fatalf("hole cards len = %v %v, want 2 2", len(st.hole[0]), len(st.hole[1]))
+	}
+	if st.hole[0][0] == st.hole[1][0] {
+		t.Fatalf("duplicate hole card across players")
+	}
+}
+
+func TestSetupHandButtonIsSB(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, _ := setupHand(seats, 1, cfg, makeRng(7), 1)
+	if st.sb != 1 || st.bb != 0 {
+		t.Fatalf("sb/bb = %d/%d, want 1/0", st.sb, st.bb)
+	}
+	if st.stacks[1] != 995 || st.stacks[0] != 990 {
+		t.Fatalf("stacks = %v %v, want seat1=995(SB) seat0=990(BB)", st.stacks[1], st.stacks[0])
+	}
+}
+
+func TestSetupHandShortStackAllIn(t *testing.T) {
+	// 起始 stack 不足 SB,BB 应只投剩余全部
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 3, Decide: alwaysCall()},
+		{ID: 1, Stack: 10, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 10}
+	st, events := setupHand(seats, 0, cfg, makeRng(1), 1)
+	// SB 应只投 3(all-in),event amount=3
+	if st.stacks[0] != 0 || !st.allIn[0] {
+		t.Fatalf("SB should be all-in, stack=%d allIn=%v", st.stacks[0], st.allIn[0])
+	}
+	if events[0].Amount != 3 {
+		t.Fatalf("SB posted = %d, want 3", events[0].Amount)
 	}
 }
