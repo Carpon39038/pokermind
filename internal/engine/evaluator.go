@@ -1,6 +1,9 @@
 package engine
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // HandCategory 德州扑克的 9 种牌型,值越大越强。
 type HandCategory int8
@@ -62,17 +65,5 @@ func (h HandRank) String() string {
 	for _, r := range h.Ranks {
 		parts = append(parts, string(rankChars[r-2]))
 	}
-	return fmt.Sprintf("%s (%s)", h.Category, joinBytes(parts))
-}
-
-// joinBytes 把单字节字符串切片用空格连成一个字符串。
-func joinBytes(parts []string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	out := parts[0]
-	for _, p := range parts[1:] {
-		out += " " + p
-	}
-	return out
+	return fmt.Sprintf("%s (%s)", h.Category, strings.Join(parts, " "))
 }
