@@ -66,8 +66,8 @@ func TestSetupHandBlinds(t *testing.T) {
 	if st.stacks[1] != 990 {
 		t.Fatalf("BB stack = %d, want 990", st.stacks[1])
 	}
-	if st.pot != 15 {
-		t.Fatalf("pot = %d, want 15", st.pot)
+	if st.pot != 0 {
+		t.Fatalf("pot = %d, want 0", st.pot)
 	}
 	if st.bets[0] != 5 || st.bets[1] != 10 {
 		t.Fatalf("bets = %v, want [5 10]", st.bets)
@@ -267,5 +267,150 @@ func TestApplyActionCallAllInTruncates(t *testing.T) {
 	}
 	if st.bets[1] != 13 {
 		t.Fatalf("bets[1] = %d, want 13 (10 + 3)", st.bets[1])
+	}
+}
+
+// raiseOnceThenCall:第一次行动 raise-to amt,之后都 call/check。
+func raiseOnceThenCall(amt int) func(obs Observation) Action {
+	called := false
+	return func(obs Observation) Action {
+		if !called {
+			called = true
+			return Action{Type: Raise, Amount: amt}
+		}
+		return Action{Type: Call}
+	}
+}
+
+func TestPlayHandFoldOnPreflop(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysFold()}, // SB 弃牌
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	events, result := PlayHand(seats, 0, cfg, makeRng(1), 1)
+
+	if !result.Folded {
+		t.Fatalf("expected fold ending")
+	}
+	if len(result.Winners) != 1 || result.Winners[0] != 1 {
+		t.Fatalf("winner = %v, want [1]", result.Winners)
+	}
+	// pot = SB+BB = 15 (fold 路径: pot + bets[0] + bets[1] = 0 + 5 + 10 = 15)
+	if result.PotWon != 15 {
+		t.Fatalf("pot won = %d, want 15", result.PotWon)
+	}
+	if events[len(events)-1].Type != HandFinished {
+		t.Fatalf("last event = %v, want HandFinished", events[len(events)-1].Type)
+	}
+}
+
+func TestPlayHandBothCallToShowdown(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	events, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
+
+	if result.Folded {
+		t.Fatalf("expected showdown, got fold")
+	}
+	if result.Showdown == nil {
+		t.Fatalf("expected ShowdownInfo")
+	}
+	// showdown 路径: advanceStreet 把 bets 并入 pot,所以 pot=20(SB 投 10, BB 投 10)
+	if result.PotWon != 20 {
+		t.Fatalf("pot won = %d, want 20", result.PotWon)
+	}
+	// 街推进次数:flop/turn/river/showdown = 4
+	advCount := 0
+	for _, e := range events {
+		if e.Type == StreetAdvanced {
+			advCount++
+		}
+	}
+	if advCount != 4 {
+		t.Fatalf("street advance count = %d, want 4", advCount)
+	}
+	// 公共牌应有 5 张(3+1+1)
+	if len(events) > 0 {
+		// 找最后一个 StreetAdvanced 之前的 community 累积
+		// 简化:从事件流中收集所有翻出的公共牌
+		var community []Card
+		for _, e := range events {
+			if e.Type == StreetAdvanced && e.Cards != nil {
+				community = append(community, e.Cards...)
+			}
+		}
+		if len(community) != 5 {
+			t.Fatalf("community cards from events = %d, want 5", len(community))
+		}
+	}
+}
+
+func TestPlayHandRaisePreflopThenShowdown(t *testing.T) {
+	// SB raise-to 30,BB call,然后都 check 到摊牌
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: raiseOnceThenCall(30)},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	_, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
+
+	// pot = 30 + 30 = 60(preflop raise-to 30, BB call 30,后续街都 check)
+	if result.PotWon != 60 {
+		t.Fatalf("pot won = %d, want 60", result.PotWon)
+	}
+}
+
+func TestPlayHandAllInRunsOutBoard(t *testing.T) {
+	// SB all-in(把剩余 995 全押,raise-to 1000),BB call 全部
+	// 之后应直接翻完剩余 street 到摊牌
+	sbDecide := func(obs Observation) Action {
+		// SB 第一次行动就 all-in:raise-to = bets + stack = 5 + 995 = 1000
+		return Action{Type: Raise, Amount: 1000}
+	}
+	bbDecide := func(obs Observation) Action {
+		return Action{Type: Call} // BB call(筹码刚好够:1000 - 10 = 990,需补 990,刚好)
+	}
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: sbDecide},
+		{ID: 1, Stack: 1000, Decide: bbDecide},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	events, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
+
+	if result.Folded {
+		t.Fatalf("expected showdown, got fold")
+	}
+	if result.Showdown == nil {
+		t.Fatalf("expected ShowdownInfo")
+	}
+	// 应该有 4 个 StreetAdvanced(flop/turn/river/showdown)
+	advCount := 0
+	for _, e := range events {
+		if e.Type == StreetAdvanced {
+			advCount++
+		}
+	}
+	if advCount != 4 {
+		t.Fatalf("street advance count = %d, want 4 (all-in runs out board)", advCount)
+	}
+}
+
+func TestPlayHandChipsConserved(t *testing.T) {
+	// 筹码守恒:PlayHand 后两人 stack 之和应为 2000
+	// 验证 showdown 路径 pot=20(SB 投 10 + BB 投 10)
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	_, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
+
+	// showdown 路径: advanceStreet 把 bets[0]=10, bets[1]=10 并入 pot,所以 pot=20
+	if result.PotWon != 20 {
+		t.Fatalf("pot won = %d, want 20 (SB 10 + BB 10)", result.PotWon)
 	}
 }

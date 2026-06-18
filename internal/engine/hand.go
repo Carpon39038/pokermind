@@ -186,7 +186,6 @@ func postBlind(st *handState, seat, amount int) int {
 	}
 	st.stacks[seat] -= amount
 	st.bets[seat] += amount
-	st.pot += amount
 	return amount
 }
 
@@ -320,7 +319,6 @@ func (st *handState) applyAction(seat int, a Action) (allIn bool, ev Event) {
 		}
 		st.stacks[seat] -= need
 		st.bets[seat] += need
-		st.pot += need
 		if st.stacks[seat] == 0 {
 			st.allIn[seat] = true
 			allIn = true
@@ -340,7 +338,6 @@ func (st *handState) applyAction(seat int, a Action) (allIn bool, ev Event) {
 		}
 		st.stacks[seat] -= delta
 		st.bets[seat] = a.Amount
-		st.pot += delta
 		if st.stacks[seat] == 0 {
 			st.allIn[seat] = true
 			allIn = true
@@ -349,4 +346,138 @@ func (st *handState) applyAction(seat int, a Action) (allIn bool, ev Event) {
 		panic("applyAction: unknown action type")
 	}
 	return allIn, ev
+}
+
+// advanceStreet 把本街 bets 累加进 pot,翻公共牌,进入下一 street。
+// Preflop→Flop(3 张),Flop→Turn(1 张),Turn→River(1 张),River→Showdown(不翻牌)。
+func (st *handState) advanceStreet(events []Event) []Event {
+	// 把本街 bets 清零并入 pot
+	st.pot += st.bets[0] + st.bets[1]
+	st.bets[0] = 0
+	st.bets[1] = 0
+
+	switch st.street {
+	case Preflop:
+		flop := drawN(st.deck, 3)
+		st.community = append(st.community, flop...)
+		st.street = Flop
+		events = append(events, Event{Type: StreetAdvanced, Street: Flop, Cards: flop})
+	case Flop:
+		turn := drawN(st.deck, 1)
+		st.community = append(st.community, turn...)
+		st.street = Turn
+		events = append(events, Event{Type: StreetAdvanced, Street: Turn, Cards: turn})
+	case Turn:
+		river := drawN(st.deck, 1)
+		st.community = append(st.community, river...)
+		st.street = River
+		events = append(events, Event{Type: StreetAdvanced, Street: River, Cards: river})
+	case River:
+		st.street = Showdown
+		events = append(events, Event{Type: StreetAdvanced, Street: Showdown})
+	}
+	return events
+}
+
+// settleShowdown 用 Evaluate/Best5 定赢家,返回(赢家列表, ShowdownInfo)。
+func (st *handState) settleShowdown() ([]int, ShowdownInfo) {
+	all0 := append(append([]Card{}, st.hole[0]...), st.community...)
+	all1 := append(append([]Card{}, st.hole[1]...), st.community...)
+	r0 := Evaluate(all0)
+	r1 := Evaluate(all1)
+	info := ShowdownInfo{
+		Best5: [][]Card{Best5(all0), Best5(all1)},
+		Ranks: []HandRank{r0, r1},
+	}
+	switch {
+	case r0.Compare(r1) > 0:
+		return []int{0}, info
+	case r0.Compare(r1) < 0:
+		return []int{1}, info
+	default:
+		return []int{0, 1}, info
+	}
+}
+
+// awardPot 把 pot 分给赢家(平局平分,余数给首位),清零 pot。
+func (st *handState) awardPot(winners []int) {
+	n := len(winners)
+	if n == 0 {
+		return
+	}
+	share := st.pot / n
+	rem := st.pot - share*n
+	for i, w := range winners {
+		add := share
+		if i == 0 {
+			add += rem
+		}
+		st.stacks[w] += add
+	}
+	st.pot = 0
+}
+
+// PlayHand 完整跑完一手 Heads-up 牌,返回事件流与结算结果。
+// button=0 表示 seat0 是按钮(SB)。
+func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) ([]Event, HandResult) {
+	st, events := setupHand(seats, button, cfg, rng, handID)
+
+	for {
+		// 一方已弃牌(理论上 setupHand 后不会立即 fold,但 runStreet 后可能)
+		if st.folded[0] || st.folded[1] {
+			winner := 0
+			if st.folded[0] {
+				winner = 1
+			}
+			pot := st.pot + st.bets[0] + st.bets[1]
+			events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: pot})
+			st.pot = pot
+			st.bets[0] = 0
+			st.bets[1] = 0
+			st.awardPot([]int{winner})
+			events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
+			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true}
+		}
+
+		events = st.runStreet(events)
+
+		// runStreet 后再检查 fold
+		if st.folded[0] || st.folded[1] {
+			winner := 0
+			if st.folded[0] {
+				winner = 1
+			}
+			pot := st.pot + st.bets[0] + st.bets[1]
+			events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: pot})
+			st.pot = pot
+			st.bets[0] = 0
+			st.bets[1] = 0
+			st.awardPot([]int{winner})
+			events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
+			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true}
+		}
+
+		// 若任一方 all-in,跳过决策,翻完剩余 street
+		if st.allIn[0] || st.allIn[1] {
+			for st.street != Showdown {
+				events = st.advanceStreet(events)
+			}
+		} else {
+			events = st.advanceStreet(events)
+		}
+
+		if st.street == Showdown {
+			winners, info := st.settleShowdown()
+			pot := st.pot
+			events = append(events, Event{Type: PotAwarded, Winners: winners, Amount: pot})
+			st.awardPot(winners)
+			events = append(events, Event{Type: HandFinished, Winners: winners})
+			// PotWon:赢家拿走的总额(平局时报告平均,余数忽略)
+			potWon := pot
+			if len(winners) > 1 {
+				potWon = pot / len(winners)
+			}
+			return events, HandResult{Winners: winners, PotWon: potWon, Folded: false, Showdown: &info}
+		}
+	}
 }
