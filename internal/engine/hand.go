@@ -323,25 +323,60 @@ func (st *handState) buildObservation(seat int) Observation {
 	}
 }
 
-// firstActor 返回本街的第一个行动者。
+// firstActor 返回本街的第一个行动者(跳过已弃牌/all-in)。
 //   N=2(Heads-up):preflop SB(=button)先,postflop BB 先(原 Heads-up 规则)
-//   N>=3:preflop bb+1 先,postflop button+1 先(顺时针,跳过弃牌)
-//   后续 task 完善多人的"跳过弃牌"细节;此处只给起点。
+//   N>=3:preflop bb+1 先,postflop button+1 先(顺时针)
+// 若所有候选都已 fold/all-in,返回 -1(本街无行动)。
 func (st *handState) firstActor() int {
 	n := len(st.seats)
+	var start int
 	if n == 2 {
 		if st.street == Preflop {
-			return st.sb
+			start = st.sb
+		} else {
+			start = st.bb
 		}
-		return st.bb
+	} else if st.street == Preflop {
+		start = (st.bb + 1) % n
+	} else {
+		start = (st.button + 1) % n
 	}
-	if st.street == Preflop {
-		return (st.bb + 1) % n
+	// 顺时针找第一个能行动的(未弃牌、未 all-in)
+	for i := 0; i < n; i++ {
+		seat := (start + i) % n
+		if !st.folded[seat] && !st.allIn[seat] {
+			return seat
+		}
 	}
-	return (st.button + 1) % n
+	return -1
 }
 
-// betsAllEqual 返回所有未弃牌玩家的本街下注是否相等。
+// nextActiveActor 从 from 的下一个 seat 起,顺时针找下一个能行动的玩家。
+// 没有则返回 -1。
+func (st *handState) nextActiveActor(from int) int {
+	n := len(st.seats)
+	for i := 1; i <= n; i++ {
+		seat := (from + i) % n
+		if !st.folded[seat] && !st.allIn[seat] {
+			return seat
+		}
+	}
+	return -1
+}
+
+// contendingCount 返回未弃牌的玩家数。
+func (st *handState) contendingCount() int {
+	c := 0
+	for _, f := range st.folded {
+		if !f {
+			c++
+		}
+	}
+	return c
+}
+
+// betsAllEqual 返回所有未弃牌玩家的本街下注是否相等
+// (all-in 玩家视为"已满足",因为不能再补)。
 func (st *handState) betsAllEqual() bool {
 	ref := -1
 	for i, b := range st.bets {
@@ -357,36 +392,63 @@ func (st *handState) betsAllEqual() bool {
 	return true
 }
 
-// runStreet 跑完一个 street 的下注轮。当前实现保留 Heads-up 双人循环语义
-// (N=2 正确);N>3 的多人行动顺序、acted 清空等逻辑留待后续 task。
+// runStreet 跑完一个 street 的下注轮,N=2..6 通用。
+//
+// 算法:
+//  1. 从 firstActor 起,顺时针轮流询问
+//  2. acted[] 标记本轮每个未弃牌未 all-in 玩家是否行动过
+//  3. 加注会重置其他玩家的 acted(他们要再决定 call/raise/fold)
+//  4. 终止条件(任一):
+//     - 只剩 1 个未弃牌玩家
+//     - 所有未弃牌未 all-in 玩家都行动过 且 betsAllEqual()
 func (st *handState) runStreet(events []Event) []Event {
 	n := len(st.seats)
-	if n != 2 {
-		// 多人版 runStreet 在后续 task 实现;此处不可达,但保留 panic 防御
-		panic("runStreet: multi-player not yet implemented (use N=2)")
-	}
 
-	// 双方 all-in,跳过(由调用方处理剩余街)
-	if st.allIn[0] && st.allIn[1] {
+	// 终止:只剩 1 个未弃牌
+	if st.contendingCount() <= 1 {
 		return events
 	}
 
+	// 终止:所有未弃牌都已 all-in(无需行动)
+	if !st.hasActivePlayer() {
+		return events
+	}
+
+	acted := make([]bool, n)
 	actor := st.firstActor()
-	acted := [2]bool{false, false}
+	if actor < 0 {
+		return events
+	}
+
+	// 终止检查:所有能行动的都 acted 且下注相等
+	streetDone := func() bool {
+		if st.contendingCount() <= 1 {
+			return true
+		}
+		// 至少有一个能行动的玩家(否则上面已 return)
+		for i := 0; i < n; i++ {
+			if st.folded[i] || st.allIn[i] {
+				continue
+			}
+			if !acted[i] {
+				return false
+			}
+		}
+		return st.betsAllEqual()
+	}
 
 	for {
-		if st.folded[0] || st.folded[1] {
+		if streetDone() {
 			break
 		}
-		if st.allIn[0] && st.allIn[1] {
-			break
-		}
-		if st.allIn[actor] {
+		// 跳过不能行动的(理论上 nextActiveActor 已经保证,但 acted 循环里
+		// 某玩家可能正好 all-in 后被轮到 —— 直接当已行动)
+		if st.folded[actor] || st.allIn[actor] {
 			acted[actor] = true
-			if acted[0] && acted[1] && st.betsAllEqual() {
+			actor = st.nextActiveActor(actor)
+			if actor < 0 {
 				break
 			}
-			actor = 1 - actor
 			continue
 		}
 
@@ -397,17 +459,37 @@ func (st *handState) runStreet(events []Event) []Event {
 		acted[actor] = true
 
 		if action.Type == Fold {
+			// 弃牌后若只剩 1 个未弃牌,PlayHand 会处理;本街立刻结束
 			break
 		}
-		if acted[0] && acted[1] && st.betsAllEqual() {
+		if action.Type == Raise {
+			// 加注重置其他人的 acted(他们要再决定);自己保持 acted=true
+			for i := 0; i < n; i++ {
+				if i != actor && !st.folded[i] && !st.allIn[i] {
+					acted[i] = false
+				}
+			}
+		}
+
+		if streetDone() {
 			break
 		}
-		if st.allIn[0] && st.allIn[1] {
+		actor = st.nextActiveActor(actor)
+		if actor < 0 {
 			break
 		}
-		actor = 1 - actor
 	}
 	return events
+}
+
+// hasActivePlayer 返回是否还有未弃牌且未 all-in 的玩家(可继续行动)。
+func (st *handState) hasActivePlayer() bool {
+	for i := 0; i < len(st.seats); i++ {
+		if !st.folded[i] && !st.allIn[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // applyAction 应用一个动作,返回是否触发 all-in 与事件。
@@ -551,16 +633,30 @@ func (st *handState) anyAllIn() bool {
 	return false
 }
 
+// soleContender 返回唯一的未弃牌玩家 seat;若不止 1 个未弃牌返回 -1。
+func (st *handState) soleContender() int {
+	winner := -1
+	for i, f := range st.folded {
+		if !f {
+			if winner != -1 {
+				return -1
+			}
+			winner = i
+		}
+	}
+	return winner
+}
+
 // PlayHand 完整跑完一手牌,返回事件流与结算结果。
 //
-// 当前实现支持 Heads-up(N=2,完整正确);N>=3 的多人逻辑(runStreet 行动顺序、
-// sidepot 结算)在后续 task 落地。N!=2 时 panic。
+// 当前实现:
+//   - N=2..6 的盲注、发牌、下注轮(runStreet)均完整支持
+//   - 弃牌结算(只剩 1 个未弃牌玩家)完整支持
+//   - 摊牌结算:settleShowdown 仍只处理 N=2;N>=3 多人摊牌需走 sidepot
+//     (M3-6max Task 2e)。N>=3 一路打到摊牌会 panic。
 //
 // button 是按钮位 seat 索引。
 func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) ([]Event, HandResult) {
-	if len(seats) != 2 {
-		panic("PlayHand: multi-player not yet implemented (use N=2)")
-	}
 	st, events := setupHand(seats, button, cfg, rng, handID)
 
 	finishByFold := func(winner int) ([]Event, HandResult) {
@@ -573,24 +669,16 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 	}
 
 	for {
-		// 一方已弃牌(理论上 setupHand 后不会立即 fold,但 runStreet 后可能)
-		if st.folded[0] || st.folded[1] {
-			winner := 0
-			if st.folded[0] {
-				winner = 1
-			}
-			return finishByFold(winner)
+		// 只剩 1 个未弃牌玩家(setupHand 后理论上不会,但防御)
+		if w := st.soleContender(); w >= 0 {
+			return finishByFold(w)
 		}
 
 		events = st.runStreet(events)
 
-		// runStreet 后再检查 fold
-		if st.folded[0] || st.folded[1] {
-			winner := 0
-			if st.folded[0] {
-				winner = 1
-			}
-			return finishByFold(winner)
+		// runStreet 后只剩 1 个未弃牌 → fold 结算
+		if w := st.soleContender(); w >= 0 {
+			return finishByFold(w)
 		}
 
 		// 若任一方 all-in,跳过决策,翻完剩余 street
@@ -603,7 +691,7 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 		}
 
 		if st.street == Showdown {
-			winners, info := st.settleShowdown()
+			winners, info := st.settleShowdown() // 2e: 多人版改 sidepot
 			pot := st.pot
 			events = append(events, Event{Type: PotAwarded, Winners: winners, Amount: pot})
 			st.awardPot(winners)

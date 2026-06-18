@@ -461,3 +461,84 @@ func TestPlayHandChipsConserved(t *testing.T) {
 		}
 	}
 }
+
+// TestPlayHandThreePlayersFoldToWinner 是 N=3 的烟雾测试:三个 RuleBot,
+// 都倾向 preflop 弃牌弱牌。验证:
+//   - 多人盲注位正确(SB/BB/button)
+//   - runStreet 多人行动顺序不 panic、能终止
+//   - 弃牌结算(只剩 1 个未弃牌)正确,筹码守恒
+//
+// 注意:RuleBot 在拿到口袋对时会 call,所以可能进 flop —— 但只要一路 fold
+// 到摊牌前结束就用 soleContender 路径,不碰 settleShowdown(多人摊牌待 2e)。
+func TestPlayHandThreePlayersFoldToWinner(t *testing.T) {
+	// 找一个 seed:三个 RuleBot 都拿非口袋对的弱牌 → 都 fold → soleContender 结束
+	// 用 alwaysFold 强制让三人 fold,保证不进摊牌(避开多人 settle)
+	foldAlways := func(obs Observation) Action { return Action{Type: Fold} }
+	seats := []PlayerSeat{
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(foldAlways)},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(foldAlways)},
+		{ID: 2, Stack: 1000, Player: PlayerFromFunc(alwaysCall())}, // 这个不弃,躺赢
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	events, result := PlayHand(seats, 0, cfg, makeRng(1), 1)
+
+	if !result.Folded {
+		t.Fatalf("expected fold ending, got showdown (multi-player settle not yet supported)")
+	}
+	if len(result.Winners) != 1 || result.Winners[0] != 2 {
+		t.Fatalf("winner = %v, want [2] (only non-folder)", result.Winners)
+	}
+	// 筹码守恒:三人 stack 之和 = 3000
+	sum := 0
+	for _, s := range result.FinalStacks {
+		sum += s
+	}
+	if sum != 3000 {
+		t.Fatalf("chips sum = %d, want 3000 (conservation)", sum)
+	}
+	// 至少应有一个 BlindPosted 事件 + 几个 ActionTaken(Fold)
+	blindCount, foldCount := 0, 0
+	for _, ev := range events {
+		if ev.Type == BlindPosted {
+			blindCount++
+		}
+		if ev.Type == ActionTaken && ev.Action != nil && ev.Action.Type == Fold {
+			foldCount++
+		}
+	}
+	if blindCount != 2 {
+		t.Fatalf("blind events = %d, want 2 (SB + BB)", blindCount)
+	}
+	if foldCount != 2 {
+		t.Fatalf("fold events = %d, want 2 (two folders)", foldCount)
+	}
+	// 最终事件应是 HandFinished
+	if events[len(events)-1].Type != HandFinished {
+		t.Fatalf("last event = %v, want HandFinished", events[len(events)-1].Type)
+	}
+}
+
+// TestPlayHandThreePlayersBlinds 验证 N=3 的盲注位:button=0 时
+// sb=1, bb=2(标准多人规则 sb=(button+1)%N, bb=(button+2)%N)。
+func TestPlayHandThreePlayersBlinds(t *testing.T) {
+	seats := []PlayerSeat{
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 2, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	// 不调用 PlayHand(三人 alwaysCall 会一路打到摊牌,触发 N>2 settle panic);
+	// 只验 setupHand 的盲注位
+	st, events := setupHand(seats, 0, cfg, makeRng(1), 1)
+	if st.sb != 1 || st.bb != 2 {
+		t.Fatalf("N=3 button=0: sb/bb = %d/%d, want 1/2", st.sb, st.bb)
+	}
+	// 三人都应被扣盲注或发底牌:事件流应有 2 BlindPosted + 3 DealtHole
+	if len(events) != 5 {
+		t.Fatalf("setupHand events = %d, want 5 (2 blinds + 3 deals)", len(events))
+	}
+	// sb(1)扣 5,bb(2)扣 10,seat0 不扣
+	if st.stacks[0] != 1000 || st.stacks[1] != 995 || st.stacks[2] != 990 {
+		t.Fatalf("stacks = %v, want [1000 995 990]", st.stacks)
+	}
+}
