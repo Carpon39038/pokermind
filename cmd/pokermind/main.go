@@ -5,14 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"pokermind/internal/engine"
+	"pokermind/internal/match"
 	"pokermind/internal/players"
 	"pokermind/internal/players/providers"
+	"pokermind/internal/store"
 )
 
 func main() {
@@ -27,6 +30,10 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		runCmd(os.Args[2:])
+	case "match":
+		matchCmd(os.Args[2:])
+	case "leaderboard":
+		leaderboardCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -40,18 +47,65 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `pokermind — multi-LLM Texas Hold'em arena
 
 Usage:
-  pokermind run --provider <deepseek|glm> --model <model-name> [options]
+  pokermind run --provider <deepseek|glm> --model <name> [options]
+      Play N hands of <LLM> vs RuleBot, print each action + reasoning.
 
-Options:
-  --provider    LLM provider: deepseek or glm (required)
-  --model       Model name (e.g. deepseek-v4-flash, deepseek-v4-pro, glm-4.6) (required)
-  --hands       Number of hands to play (default 1)
-  --seed        RNG seed for reproducible dealing (default 1)
+  pokermind match --p1 <provider:model> --p2 <provider:model> [options]
+      Play a Heads-up match between two models, persist to SQLite, update ELO.
+
+  pokermind leaderboard [--db path]
+      Print current ELO leaderboard from the database.
+
+run options:
+  --provider    deepseek or glm (required)
+  --model       e.g. deepseek-v4-flash, deepseek-v4-pro, glm-4.6 (required)
+  --hands       Number of hands (default 1)
+  --seed        RNG seed (default 1)
+
+match options:
+  --p1, --p2    player spec as provider:model (e.g. deepseek:deepseek-v4-flash)
+  --hands       hands per match (default 100)
+  --seed        RNG seed (default 1)
+  --db          SQLite path (default pokermind.db)
+  --verbose     print every LLM action's reasoning (default: only summaries)
 
 Env (see .env.example):
   POKERMIND_DEEPSEEK_API_KEY / POKERMIND_DEEPSEEK_BASE_URL
   POKERMIND_GLM_API_KEY      / POKERMIND_GLM_BASE_URL
   POKERMIND_HTTP_TIMEOUT_SECONDS (default 60)`)
+}
+
+// newLLMPlayer 按 provider+model 构造一个 *players.LLMPlayer。
+// provider 缺 key/未知时返回 error。
+func newLLMPlayer(provider, model string, httpClient *http.Client) (*players.LLMPlayer, error) {
+	var baseURL, apiKey string
+	switch provider {
+	case "deepseek":
+		baseURL = envStr("POKERMIND_DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+		apiKey = mustEnv("POKERMIND_DEEPSEEK_API_KEY")
+	case "glm":
+		baseURL = envStr("POKERMIND_GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+		apiKey = mustEnv("POKERMIND_GLM_API_KEY")
+	default:
+		return nil, fmt.Errorf("unknown provider %q (want deepseek or glm)", provider)
+	}
+	return &players.LLMPlayer{
+		Provider: &providers.OpenAICompatProvider{
+			BaseURL: baseURL,
+			APIKey:  apiKey,
+			HTTP:    httpClient,
+		},
+		Model: model,
+	}, nil
+}
+
+// parsePlayerSpec 把 "deepseek:deepseek-v4-flash" 拆成 (provider, model)。
+func parsePlayerSpec(spec string) (provider, model string, err error) {
+	parts := strings.SplitN(spec, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid player spec %q (want provider:model)", spec)
+	}
+	return parts[0], parts[1], nil
 }
 
 func runCmd(args []string) {
@@ -71,29 +125,10 @@ func runCmd(args []string) {
 	timeoutSec := envInt("POKERMIND_HTTP_TIMEOUT_SECONDS", 60)
 	httpClient := providers.DefaultHTTPClient(timeoutSec)
 
-	var llmPlayer *players.LLMPlayer
-	switch *provider {
-	case "deepseek":
-		llmPlayer = &players.LLMPlayer{
-			Provider: &providers.OpenAICompatProvider{
-				BaseURL: envStr("POKERMIND_DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-				APIKey:  mustEnv("POKERMIND_DEEPSEEK_API_KEY"),
-				HTTP:    httpClient,
-			},
-			Model: *model,
-		}
-	case "glm":
-		llmPlayer = &players.LLMPlayer{
-			Provider: &providers.OpenAICompatProvider{
-				BaseURL: envStr("POKERMIND_GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
-				APIKey:  mustEnv("POKERMIND_GLM_API_KEY"),
-				HTTP:    httpClient,
-			},
-			Model: *model,
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "ERROR: unknown provider %q (want deepseek or glm)\n", *provider)
-		os.Exit(2)
+	llmPlayer, err := newLLMPlayer(*provider, *model, httpClient)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
 	}
 
 	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
@@ -119,6 +154,119 @@ func runCmd(args []string) {
 		}
 		button = 1 - button
 		time.Sleep(500 * time.Millisecond) // 给 provider 喘息,避免限速
+	}
+}
+
+// matchCmd: pokermind match --p1 provider:model --p2 provider:model [--hands N] [--seed S] [--db path] [--verbose]
+func matchCmd(args []string) {
+	fs := flag.NewFlagSet("match", flag.ExitOnError)
+	p1Spec := fs.String("p1", "", "player 1 spec provider:model")
+	p2Spec := fs.String("p2", "", "player 2 spec provider:model")
+	hands := fs.Int("hands", 100, "hands per match")
+	seed := fs.Int64("seed", 1, "RNG seed")
+	dbPath := fs.String("db", "pokermind.db", "SQLite path")
+	verbose := fs.Bool("verbose", false, "print every LLM action's reasoning")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if *p1Spec == "" || *p2Spec == "" {
+		fmt.Fprintln(os.Stderr, "ERROR: --p1 and --p2 are required (provider:model)")
+		os.Exit(2)
+	}
+
+	p1Prov, p1Model, err := parsePlayerSpec(*p1Spec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(2)
+	}
+	p2Prov, p2Model, err := parsePlayerSpec(*p2Spec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(2)
+	}
+
+	timeoutSec := envInt("POKERMIND_HTTP_TIMEOUT_SECONDS", 60)
+	httpClient := providers.DefaultHTTPClient(timeoutSec)
+
+	// makePlayer 工厂:每次 match.Play 调用前生成新的 LLMPlayer(避免共享状态)
+	makePlayer := func(provider, model string) func() engine.Player {
+		return func() engine.Player {
+			p, err := newLLMPlayer(provider, model, httpClient)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "ERROR:", err)
+				os.Exit(1)
+			}
+			return p
+		}
+	}
+
+	rec, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
+	defer rec.Close()
+
+	spec1 := match.PlayerSpec{Provider: p1Prov, Model: p1Model, Label: p1Model}
+	spec2 := match.PlayerSpec{Provider: p2Prov, Model: p2Model, Label: p2Model}
+
+	fmt.Printf("=== Match: %s vs %s, %d hands, seed=%d ===\n", spec1.Label, spec2.Label, *hands, *seed)
+	started := time.Now()
+
+	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	res, err := match.Play(spec1, spec2, makePlayer(p1Prov, p1Model), makePlayer(p2Prov, p2Model), *hands, cfg, rec, *seed)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
+
+	elapsed := time.Since(started).Round(time.Second)
+	winnerLabel := "draw"
+	switch res.Winner {
+	case 0:
+		winnerLabel = spec1.Label
+	case 1:
+		winnerLabel = spec2.Label
+	}
+	fmt.Printf("\n=== Match over: winner=%s, %d hands played, elapsed=%v ===\n", winnerLabel, res.HandsPlayed, elapsed)
+	fmt.Printf("    final chips: %s=%d  %s=%d\n", spec1.Label, res.FinalStacks[0], spec2.Label, res.FinalStacks[1])
+	fmt.Printf("    ELO change:  %s=%+d  %s=%+d\n", spec1.Label, int(res.EloChange[0]), spec2.Label, int(res.EloChange[1]))
+
+	printLeaderboard(rec)
+	_ = verbose // verbose 模式留待后续在 match 包加 hook
+}
+
+// leaderboardCmd: pokermind leaderboard [--db path]
+func leaderboardCmd(args []string) {
+	fs := flag.NewFlagSet("leaderboard", flag.ExitOnError)
+	dbPath := fs.String("db", "pokermind.db", "SQLite path")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	rec, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
+	defer rec.Close()
+	printLeaderboard(rec)
+}
+
+// printLeaderboard 打印 ELO 排行榜。
+func printLeaderboard(rec *store.Store) {
+	lb, err := rec.Leaderboard()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR reading leaderboard:", err)
+		return
+	}
+	if len(lb) == 0 {
+		fmt.Println("(no players yet)")
+		return
+	}
+	fmt.Println("\n--- Leaderboard ---")
+	fmt.Printf("%-24s %6s %6s %6s %10s\n", "player", "elo", "games", "wins", "net_chips")
+	for _, r := range lb {
+		fmt.Printf("%-24s %6d %6d %6d %10d\n", r.Label, r.Elo, r.Games, r.Wins, r.NetChips)
 	}
 }
 
