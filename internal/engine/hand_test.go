@@ -120,3 +120,152 @@ func TestSetupHandShortStackAllIn(t *testing.T) {
 		t.Fatalf("SB posted = %d, want 3", events[0].Amount)
 	}
 }
+
+func TestFirstActor(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+	if st.firstActor() != 0 {
+		t.Fatalf("preflop firstActor (button=0) = %d, want 0", st.firstActor())
+	}
+	st.street = Flop
+	if st.firstActor() != 1 {
+		t.Fatalf("flop firstActor (button=0, BB=1) = %d, want 1", st.firstActor())
+	}
+
+	st2, _ := setupHand(seats, 1, cfg, makeRng(1), 1)
+	if st2.firstActor() != 1 {
+		t.Fatalf("preflop firstActor (button=1) = %d, want 1", st2.firstActor())
+	}
+	st2.street = Flop
+	if st2.firstActor() != 0 {
+		t.Fatalf("flop firstActor (button=1, BB=0) = %d, want 0", st2.firstActor())
+	}
+}
+
+func TestRunStreetPreflopBothCall(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+
+	var events []Event
+	events = st.runStreet(events)
+
+	// SB(0)先 call(补 5),BB(1)再 call(已是 10,ToCall=0,check)
+	if st.bets[0] != 10 || st.bets[1] != 10 {
+		t.Fatalf("bets = %v, want [10 10]", st.bets)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	if events[0].Seat != 0 {
+		t.Fatalf("first actor = %d, want 0 (SB)", events[0].Seat)
+	}
+	if events[1].Seat != 1 {
+		t.Fatalf("second actor = %d, want 1 (BB)", events[1].Seat)
+	}
+}
+
+func TestRunStreetFoldEndsStreet(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysFold()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+
+	var events []Event
+	events = st.runStreet(events)
+
+	if !st.folded[0] {
+		t.Fatalf("seat0 should have folded")
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1 (single fold)", len(events))
+	}
+}
+
+func TestApplyActionRaiseToSemantics(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+
+	// SB(0)raise-to 30
+	_, ev := st.applyAction(0, Action{Type: Raise, Amount: 30})
+	if st.bets[0] != 30 {
+		t.Fatalf("after raise-to 30, bets[0] = %d, want 30", st.bets[0])
+	}
+	// SB 原 995,从 5 补到 30 = 补 25,剩 970
+	if st.stacks[0] != 970 {
+		t.Fatalf("stack[0] = %d, want 970", st.stacks[0])
+	}
+	if ev.Action.Type != Raise || ev.Action.Amount != 30 {
+		t.Fatalf("event action = %+v, want raise-to 30", ev.Action)
+	}
+}
+
+func TestApplyActionRaiseBelowMinPanics(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+	// max=10(BB),minRaiseTo=20。SB raise-to 15(< 20,且非 all-in)应 panic
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for raise below min")
+		}
+	}()
+	st.applyAction(0, Action{Type: Raise, Amount: 15})
+}
+
+func TestApplyActionRaiseAllInBelowMinAllowed(t *testing.T) {
+	// 短筹 all-in:即使 raise-to 低于 min,只要是把剩余 stack 全押上,允许
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	// 调整 SB 的 stack 到 14:已投 SB 5,剩 9。raise-to 14(all-in,< min 20)
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+	st.stacks[0] = 9 // 模拟 SB 剩 9
+	st.bets[0] = 5   // 已投 5,raise-to 14 = all-in
+	allIn, _ := st.applyAction(0, Action{Type: Raise, Amount: 14})
+	if !allIn {
+		t.Fatalf("expected all-in")
+	}
+	if st.bets[0] != 14 {
+		t.Fatalf("bets[0] = %d, want 14", st.bets[0])
+	}
+}
+
+func TestApplyActionCallAllInTruncates(t *testing.T) {
+	// call 时筹码不足以匹配,只投剩余全部并 all-in
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Decide: alwaysCall()},
+		{ID: 1, Stack: 1000, Decide: alwaysCall()},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	st, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+	// 让 BB stacks 模拟不足:BB 已投 10,只剩 3;对手 max=30 时 call 需 20,但只有 3
+	st.stacks[1] = 3
+	st.bets[0] = 30 // 模拟对手已 raise-to 30
+	allIn, _ := st.applyAction(1, Action{Type: Call})
+	if !allIn {
+		t.Fatalf("expected all-in")
+	}
+	if st.bets[1] != 13 {
+		t.Fatalf("bets[1] = %d, want 13 (10 + 3)", st.bets[1])
+	}
+}

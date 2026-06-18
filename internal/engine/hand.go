@@ -202,3 +202,151 @@ func drawN(d *Deck, n int) []Card {
 	}
 	return out
 }
+
+// currentMaxBet 返回本街两人中的最高下注。
+func (st *handState) currentMaxBet() int {
+	if st.bets[0] > st.bets[1] {
+		return st.bets[0]
+	}
+	return st.bets[1]
+}
+
+// toCallFor 返回某 seat 跟注需补多少(= 本街最高下注 - 自己本街已投入,下限 0)。
+func (st *handState) toCallFor(seat int) int {
+	diff := st.currentMaxBet() - st.bets[seat]
+	if diff < 0 {
+		return 0
+	}
+	return diff
+}
+
+// minRaiseTo 返回最小 raise-to 额度。简化规则:= 当前最高下注 + BB。
+func (st *handState) minRaiseTo() int {
+	return st.currentMaxBet() + st.cfg.BigBlind
+}
+
+// buildObservation 构造给某 seat 的可见信息。
+func (st *handState) buildObservation(seat int) Observation {
+	opp := 1 - seat
+	return Observation{
+		HandID:      st.handID,
+		Street:      st.street,
+		HoleCards:   st.hole[seat],
+		Community:   st.community,
+		Pot:         st.pot + st.bets[0] + st.bets[1],
+		ToCall:      st.toCallFor(seat),
+		MinRaise:    st.minRaiseTo(),
+		MyStack:     st.stacks[seat],
+		MyBet:       st.bets[seat],
+		OpponentBet: st.bets[opp],
+		IsButton:    seat == st.button,
+	}
+}
+
+// firstActor 返回本街的第一个行动者。Preflop: SB(按钮)先;Postflop: BB 先。
+func (st *handState) firstActor() int {
+	if st.street == Preflop {
+		return st.sb
+	}
+	return st.bb
+}
+
+// betsEqual 返回两人本街下注是否相等。
+func (st *handState) betsEqual() bool { return st.bets[0] == st.bets[1] }
+
+// runStreet 跑完一个 street 的下注轮,把 ActionTaken 事件追加到 events 并返回。
+func (st *handState) runStreet(events []Event) []Event {
+	// 双方 all-in,跳过(由调用方处理剩余街)
+	if st.allIn[0] && st.allIn[1] {
+		return events
+	}
+
+	actor := st.firstActor()
+	acted := [2]bool{false, false}
+
+	for {
+		// 一方已弃牌,立刻结束
+		if st.folded[0] || st.folded[1] {
+			break
+		}
+		// 双方都 all-in,结束
+		if st.allIn[0] && st.allIn[1] {
+			break
+		}
+		// 行动者已 all-in,跳过并把 acted 置位
+		if st.allIn[actor] {
+			acted[actor] = true
+			// 若两人都行动过且下注相等,结束
+			if acted[0] && acted[1] && st.betsEqual() {
+				break
+			}
+			actor = 1 - actor
+			continue
+		}
+
+		obs := st.buildObservation(actor)
+		action := st.seats[actor].Decide(obs)
+		_, ev := st.applyAction(actor, action)
+		events = append(events, ev)
+		acted[actor] = true
+
+		if action.Type == Fold {
+			break
+		}
+		// 终止:两人都行动过且下注相等
+		if acted[0] && acted[1] && st.betsEqual() {
+			break
+		}
+		// 双方都 all-in,结束
+		if st.allIn[0] && st.allIn[1] {
+			break
+		}
+		actor = 1 - actor
+	}
+	return events
+}
+
+// applyAction 应用一个动作,返回是否触发 all-in 与事件。
+// 非法动作(raise-to 过低/超筹、未知 Type)panic。
+func (st *handState) applyAction(seat int, a Action) (allIn bool, ev Event) {
+	ev = Event{Type: ActionTaken, Street: st.street, Seat: seat, Action: &a}
+	switch a.Type {
+	case Fold:
+		st.folded[seat] = true
+	case Call:
+		need := st.toCallFor(seat)
+		if need > st.stacks[seat] {
+			need = st.stacks[seat]
+		}
+		st.stacks[seat] -= need
+		st.bets[seat] += need
+		st.pot += need
+		if st.stacks[seat] == 0 {
+			st.allIn[seat] = true
+			allIn = true
+		}
+	case Raise:
+		if a.Amount <= st.bets[seat] {
+			panic("applyAction: raise-to must be greater than current bet")
+		}
+		delta := a.Amount - st.bets[seat]
+		if delta > st.stacks[seat] {
+			panic("applyAction: raise-to exceeds stack")
+		}
+		// 允许 all-in 不足 minRaise,否则必须 >= minRaiseTo
+		isAllIn := (a.Amount == st.bets[seat]+st.stacks[seat])
+		if a.Amount < st.minRaiseTo() && !isAllIn {
+			panic("applyAction: raise-to below minimum")
+		}
+		st.stacks[seat] -= delta
+		st.bets[seat] = a.Amount
+		st.pot += delta
+		if st.stacks[seat] == 0 {
+			st.allIn[seat] = true
+			allIn = true
+		}
+	default:
+		panic("applyAction: unknown action type")
+	}
+	return allIn, ev
+}
