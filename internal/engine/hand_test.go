@@ -413,4 +413,19 @@ func TestPlayHandChipsConserved(t *testing.T) {
 	if result.PotWon != 20 {
 		t.Fatalf("pot won = %d, want 20 (SB 10 + BB 10)", result.PotWon)
 	}
+	// 筹码守恒:两人最终 stack 之和 = 起始之和(2000)
+	if got := result.FinalStacks[0] + result.FinalStacks[1]; got != 2000 {
+		t.Fatalf("final stacks sum = %d, want 2000 (chips not conserved)", got)
+	}
+	// 赢家拿走 pot(20),输家不变。两人都投入 10,所以:
+	// 赢家 = 1000 - 10 + 20 = 1010;输家 = 1000 - 10 = 990
+	if result.Winners[0] == 0 {
+		if result.FinalStacks[0] != 1010 || result.FinalStacks[1] != 990 {
+			t.Fatalf("stacks = %v, want [1010 990]", result.FinalStacks)
+		}
+	} else {
+		if result.FinalStacks[0] != 990 || result.FinalStacks[1] != 1010 {
+			t.Fatalf("stacks = %v, want [990 1010]", result.FinalStacks)
+		}
+	}
 }

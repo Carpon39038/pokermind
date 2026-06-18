@@ -102,10 +102,11 @@ type Event struct {
 
 // HandResult 是一手牌的最终结算。
 type HandResult struct {
-	Winners  []int         // 赢家 seat 索引(平局时多个)
-	PotWon   int           // 赢家总入账
-	Folded   bool          // 是否因弃牌结束
-	Showdown *ShowdownInfo // 摊牌时非 nil
+	Winners     []int         // 赢家 seat 索引(平局时多个)
+	PotWon      int           // 赢家总入账(平局时为人均,余数归首位已在 FinalStacks 体现)
+	Folded      bool          // 是否因弃牌结束
+	Showdown    *ShowdownInfo // 摊牌时非 nil
+	FinalStacks [2]int        // 结算后两人筹码(便于校验守恒)
 }
 
 // ShowdownInfo 是摊牌细节。
@@ -436,7 +437,7 @@ func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 			st.bets[1] = 0
 			st.awardPot([]int{winner})
 			events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
-			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true}
+			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true, FinalStacks: st.stacks}
 		}
 
 		events = st.runStreet(events)
@@ -454,7 +455,7 @@ func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 			st.bets[1] = 0
 			st.awardPot([]int{winner})
 			events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
-			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true}
+			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true, FinalStacks: st.stacks}
 		}
 
 		// 若任一方 all-in,跳过决策,翻完剩余 street
@@ -477,7 +478,7 @@ func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 			if len(winners) > 1 {
 				potWon = pot / len(winners)
 			}
-			return events, HandResult{Winners: winners, PotWon: potWon, Folded: false, Showdown: &info}
+			return events, HandResult{Winners: winners, PotWon: potWon, Folded: false, Showdown: &info, FinalStacks: st.stacks}
 		}
 	}
 }
