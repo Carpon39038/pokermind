@@ -15,6 +15,7 @@ import (
 	"pokermind/internal/match"
 	"pokermind/internal/players"
 	"pokermind/internal/players/providers"
+	"pokermind/internal/server"
 	"pokermind/internal/store"
 )
 
@@ -34,6 +35,8 @@ func main() {
 		matchCmd(os.Args[2:])
 	case "leaderboard":
 		leaderboardCmd(os.Args[2:])
+	case "serve":
+		serveCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -55,6 +58,9 @@ Usage:
 
   pokermind leaderboard [--db path]
       Print current ELO leaderboard from the database.
+
+  pokermind serve [--addr :8080] [--db path] [--web dir]
+      Start the web UI (game replay viewer) on http://localhost:8080.
 
 run options:
   --provider    deepseek or glm (required)
@@ -250,6 +256,32 @@ func leaderboardCmd(args []string) {
 	}
 	defer rec.Close()
 	printLeaderboard(rec)
+}
+
+// serveCmd: pokermind serve [--addr :8080] [--db path] [--web dir]
+func serveCmd(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", ":8080", "listen address")
+	dbPath := fs.String("db", "pokermind.db", "SQLite path")
+	webDir := fs.String("web", "web", "static files directory (absolute or relative to cwd)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+
+	rec, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
+	defer rec.Close()
+
+	srv := server.New(rec, *webDir)
+	fmt.Printf("PokerMind web UI: http://localhost%s/  (db=%s, web=%s)\n", *addr, *dbPath, *webDir)
+	fmt.Println("Ctrl-C 退出。")
+	if err := http.ListenAndServe(*addr, srv); err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
 }
 
 // printLeaderboard 打印 ELO 排行榜。
