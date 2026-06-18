@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -15,6 +16,10 @@ import (
 )
 
 func main() {
+	// 启动时自动加载 .env(若存在)。已在环境中显式 export 的变量优先,
+	// 文件里的同名值不会覆盖。
+	loadDotEnv(".env")
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -188,6 +193,46 @@ func cardsStr(cs []engine.Card) string {
 		parts = append(parts, c.String())
 	}
 	return strings.Join(parts, " ")
+}
+
+// loadDotEnv 从 path 加载 KEY=VALUE 到 os.Environ。
+// 已在环境中存在的变量优先,文件不覆盖。文件缺失时静默(可选配置)。
+// 支持:空行/# 注释跳过;值可加单/双引号去除引号;行内 # 不当注释(只在行首)。
+// 不支持 export 前缀、变量插值、多行值 —— 刻意保持极简,stdlib only。
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return // 文件不存在是合法状态
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// 去掉可选的 "export " 前缀
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		// 去掉包围引号
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') ||
+				(val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, val)
+		}
+	}
 }
 
 // mustEnv 读必需的环境变量,缺失时退出。
