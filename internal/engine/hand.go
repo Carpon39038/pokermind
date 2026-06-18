@@ -183,6 +183,7 @@ func setupHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, hand
 		street: Preflop,
 		deck:   NewDeck(WithRand(rng)),
 	}
+	st.deck.Shuffle() // 构造的 deck 是顺序的,必须洗牌否则发牌固定
 	st.seats[0] = seats[0]
 	st.seats[1] = seats[1]
 	st.stacks[0] = seats[0].Stack

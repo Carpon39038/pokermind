@@ -121,6 +121,38 @@ func TestSetupHandShortStackAllIn(t *testing.T) {
 	}
 }
 
+// TestSetupHandDeckIsShuffled 防回归:deck 必须在发牌前洗牌。
+// 未洗的 deck 顶部 4 张是顺序的(2c 3c 4c 5c),洗牌后不同 seed 之间应不同。
+func TestSetupHandDeckIsShuffled(t *testing.T) {
+	seats := [2]PlayerSeat{
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+
+	st1, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+	st2, _ := setupHand(seats, 0, cfg, makeRng(2), 1)
+
+	// 不同 seed 必须发出不同的底牌(否则 deck 没洗)
+	same := true
+	for i := 0; i < 2; i++ {
+		if st1.hole[0][i] != st2.hole[0][i] || st1.hole[1][i] != st2.hole[1][i] {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Fatalf("two different seeds produced identical hole cards (deck not shuffled?): %v vs %v",
+			st1.hole, st2.hole)
+	}
+
+	// 同一 seed 应可复现(确定性)
+	st1b, _ := setupHand(seats, 0, cfg, makeRng(1), 1)
+	if st1b.hole[0][0] != st1.hole[0][0] {
+		t.Fatalf("same seed should produce same first card")
+	}
+}
+
 func TestFirstActor(t *testing.T) {
 	seats := [2]PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
