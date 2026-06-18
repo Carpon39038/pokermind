@@ -124,8 +124,73 @@ a:hover { text-decoration: underline; }
 }
 .pot { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
 .pot .amount { color: var(--accent-warm); font-weight: 600; }
-.community-cards { font-size: 22px; letter-spacing: 2px; font-family: "Menlo", "Consolas", monospace; min-height: 30px; }
+.community-cards { display: flex; gap: 4px; min-height: 76px; align-items: center; justify-content: center; }
 .seat-2 { grid-column: 3; grid-row: 2; }
+
+/* ========= 具象扑克牌 ========= */
+.cards-row {
+  display: flex; gap: 4px;
+  min-height: 76px;
+  align-items: center;
+  justify-content: center;
+}
+.cards-row.empty { color: var(--text-dim); font-style: italic; }
+
+/* 单张牌:白底圆角,左上角点数+花色,中央大花色 */
+.card {
+  width: 50px; height: 70px;
+  background: #fafafa;
+  border: 1px solid #2c3940;
+  border-radius: 6px;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+  font-family: "Georgia", "Times New Roman", serif;
+  user-select: none;
+}
+.card.red { color: #c0392b; }
+.card.black { color: #1a1a1a; }
+
+/* 左上角标(点数+花色,小号,左对齐) */
+.card .corner {
+  position: absolute;
+  top: 3px; left: 4px;
+  font-size: 11px;
+  line-height: 1;
+  text-align: center;
+  font-weight: 700;
+}
+.card .corner .rank { display: block; }
+.card .corner .suit { display: block; font-size: 10px; }
+
+/* 中央大花色 */
+.card .pip {
+  font-size: 28px;
+  line-height: 1;
+}
+
+/* 牌背:深色菱形纹 */
+.card.back {
+  background:
+    repeating-linear-gradient(
+      45deg,
+      #2a4d6e 0 6px,
+      #1e3a52 6px 12px
+    );
+  border: 1px solid #4a6f8e;
+}
+.card.back::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 3px;
+}
+.card.back .pip { display: none; }
+.card.back .corner { display: none; }
+
+/* 位置标志(SB / BB)的牌堆容器微调 */
+.seat-cards { display: flex; gap: 4px; justify-content: center; min-height: 76px; align-items: center; }
 
 .street-badge {
   grid-column: 2; grid-row: 1;

@@ -16,16 +16,44 @@ function route() {
   }
 }
 
-// 把 "Ac Kh" 渲染成带颜色(红心/方块红,黑桃/梅花默认色)
+// 花色字符与颜色映射
+const SUIT_CHAR = { s: '♠', h: '♥', d: '♦', c: '♣' };
+const RANK_DISPLAY = { 14: 'A', 13: 'K', 12: 'Q', 11: 'J', 10: 'T' };
+
+// 把 "Ac Kh" 渲染成具象扑克牌组件(白底圆角 + 左上角点数花色 + 中央大花色)
+// 空串 → 一张牌背占位(对手未摊牌)
 function renderCards(str) {
-  if (!str) return '<span class="hidden-card">—</span>';
-  return str.split(/\s+/).map(token => {
-    // token 形如 "As" / "Th" / "2d" / "Kc";第二字符 s/h/d/c
-    if (token.length < 2) return token;
-    const suit = token[token.length - 1];
-    const isRed = (suit === 'h' || suit === 'd');
-    return `<span class="${isRed ? 'red' : ''}">${token}</span>`;
-  }).join(' ');
+  if (!str || !str.trim()) {
+    return '<div class="cards-row empty">未摊牌</div>';
+  }
+  const cards = str.trim().split(/\s+/).map(renderCard).join('');
+  return `<div class="cards-row">${cards}</div>`;
+}
+
+// 渲染固定数量的牌背(用于对手底牌未公开时)
+function renderCardBacks(n) {
+  const backs = Array.from({ length: n }, () => '<div class="card back"></div>').join('');
+  return `<div class="cards-row">${backs}</div>`;
+}
+
+// 单张牌:token 如 "As" → A 黑桃
+function renderCard(token) {
+  if (token.length < 2) return token;
+  const rankChar = token.slice(0, -1);     // "A" / "K" / "10"(注意 T 不是 10)
+  const suitChar = token[token.length - 1]; // "s"/"h"/"d"/"c"
+  // 数据里 T 表示 10,显示还原成 10
+  const rankDisplay = (rankChar === 'T') ? '10' : rankChar;
+  const suitSymbol = SUIT_CHAR[suitChar] || suitChar;
+  const isRed = (suitChar === 'h' || suitChar === 'd');
+  const colorCls = isRed ? 'red' : 'black';
+  return `
+    <div class="card ${colorCls}">
+      <div class="corner">
+        <span class="rank">${escapeHtml(rankDisplay)}</span>
+        <span class="suit">${suitSymbol}</span>
+      </div>
+      <div class="pip">${suitSymbol}</div>
+    </div>`;
 }
 
 async function fetchJSON(url) {
