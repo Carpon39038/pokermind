@@ -43,18 +43,20 @@ func TestCardString(t *testing.T) {
 	}
 }
 
-func TestShuffleDeterministicWithSameSeed(t *testing.T) {
-	drawAll := func(d *Deck) []Card {
-		out := make([]Card, 0, 52)
-		for {
-			c, ok := d.Draw()
-			if !ok {
-				break
-			}
-			out = append(out, c)
+// drawAll 把牌堆剩余牌全部抽出,顺序为 Draw 顺序。
+func drawAll(d *Deck) []Card {
+	out := make([]Card, 0, 52)
+	for {
+		c, ok := d.Draw()
+		if !ok {
+			break
 		}
-		return out
+		out = append(out, c)
 	}
+	return out
+}
+
+func TestShuffleDeterministicWithSameSeed(t *testing.T) {
 	d1 := NewDeck(WithRand(rand.New(rand.NewSource(42))))
 	d1.Shuffle()
 	seq1 := drawAll(d1)
@@ -74,17 +76,6 @@ func TestShuffleDeterministicWithSameSeed(t *testing.T) {
 }
 
 func TestShuffleDifferentSeedsDiffer(t *testing.T) {
-	drawAll := func(d *Deck) []Card {
-		out := make([]Card, 0, 52)
-		for {
-			c, ok := d.Draw()
-			if !ok {
-				break
-			}
-			out = append(out, c)
-		}
-		return out
-	}
 	d1 := NewDeck(WithRand(rand.New(rand.NewSource(1))))
 	d1.Shuffle()
 	d2 := NewDeck(WithRand(rand.New(rand.NewSource(2))))
