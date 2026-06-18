@@ -53,7 +53,7 @@ func alwaysCall() func(obs Observation) Action {
 }
 
 func TestSetupHandBlinds(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -90,7 +90,7 @@ func TestSetupHandBlinds(t *testing.T) {
 }
 
 func TestSetupHandButtonIsSB(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -106,7 +106,7 @@ func TestSetupHandButtonIsSB(t *testing.T) {
 
 func TestSetupHandShortStackAllIn(t *testing.T) {
 	// 起始 stack 不足 SB,BB 应只投剩余全部
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 3, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 10, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -124,7 +124,7 @@ func TestSetupHandShortStackAllIn(t *testing.T) {
 // TestSetupHandDeckIsShuffled 防回归:deck 必须在发牌前洗牌。
 // 未洗的 deck 顶部 4 张是顺序的(2c 3c 4c 5c),洗牌后不同 seed 之间应不同。
 func TestSetupHandDeckIsShuffled(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -154,7 +154,7 @@ func TestSetupHandDeckIsShuffled(t *testing.T) {
 }
 
 func TestFirstActor(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -180,7 +180,7 @@ func TestFirstActor(t *testing.T) {
 }
 
 func TestRunStreetPreflopBothCall(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -206,7 +206,7 @@ func TestRunStreetPreflopBothCall(t *testing.T) {
 }
 
 func TestRunStreetFoldEndsStreet(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysFold())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -225,7 +225,7 @@ func TestRunStreetFoldEndsStreet(t *testing.T) {
 }
 
 func TestApplyActionRaiseToSemantics(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -247,7 +247,7 @@ func TestApplyActionRaiseToSemantics(t *testing.T) {
 }
 
 func TestApplyActionRaiseBelowMinPanics(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -264,7 +264,7 @@ func TestApplyActionRaiseBelowMinPanics(t *testing.T) {
 
 func TestApplyActionRaiseAllInBelowMinAllowed(t *testing.T) {
 	// 短筹 all-in:即使 raise-to 低于 min,只要是把剩余 stack 全押上,允许
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -284,7 +284,7 @@ func TestApplyActionRaiseAllInBelowMinAllowed(t *testing.T) {
 
 func TestApplyActionCallAllInTruncates(t *testing.T) {
 	// call 时筹码不足以匹配,只投剩余全部并 all-in
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -315,7 +315,7 @@ func raiseOnceThenCall(amt int) func(obs Observation) Action {
 }
 
 func TestPlayHandFoldOnPreflop(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysFold())}, // SB 弃牌
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -338,7 +338,7 @@ func TestPlayHandFoldOnPreflop(t *testing.T) {
 }
 
 func TestPlayHandBothCallToShowdown(t *testing.T) {
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -383,7 +383,7 @@ func TestPlayHandBothCallToShowdown(t *testing.T) {
 
 func TestPlayHandRaisePreflopThenShowdown(t *testing.T) {
 	// SB raise-to 30,BB call,然后都 check 到摊牌
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(raiseOnceThenCall(30))},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
@@ -406,7 +406,7 @@ func TestPlayHandAllInRunsOutBoard(t *testing.T) {
 	bbDecide := func(obs Observation) Action {
 		return Action{Type: Call} // BB call(筹码刚好够:1000 - 10 = 990,需补 990,刚好)
 	}
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(sbDecide)},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(bbDecide)},
 	}
@@ -434,7 +434,7 @@ func TestPlayHandAllInRunsOutBoard(t *testing.T) {
 func TestPlayHandChipsConserved(t *testing.T) {
 	// 筹码守恒:PlayHand 后两人 stack 之和应为 2000
 	// 验证 showdown 路径 pot=20(SB 投 10 + BB 投 10)
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}

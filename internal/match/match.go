@@ -24,7 +24,7 @@ type PlayerSpec struct {
 type Result struct {
 	HandsPlayed int
 	Winner      int // 0=p1, 1=p2, -1=平局
-	FinalStacks [2]int
+	FinalStacks []int
 	GameID      int64
 	EloChange   [2]float64 // [p1 delta, p2 delta]
 }
@@ -53,7 +53,7 @@ func Play(p1, p2 PlayerSpec, makeP1, makeP2 func() engine.Player, hands int, cfg
 		}
 	}
 
-	stacks := [2]int{cfg.StartingStack, cfg.StartingStack}
+	stacks := []int{cfg.StartingStack, cfg.StartingStack}
 	rng := rand.New(rand.NewSource(rngSeed))
 	startedAt := time.Now()
 
@@ -71,7 +71,7 @@ func Play(p1, p2 PlayerSpec, makeP1, makeP2 func() engine.Player, hands int, cfg
 		}
 
 		button := (h - 1) % 2 // h=1: button=0(p1 当 SB);h=2: button=1(p2 当 SB)
-		seats := [2]engine.PlayerSeat{
+		seats := []engine.PlayerSeat{
 			{ID: 0, Stack: stacks[0], Player: makeP1()},
 			{ID: 1, Stack: stacks[1], Player: makeP2()},
 		}

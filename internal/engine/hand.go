@@ -96,8 +96,10 @@ type Observation struct {
 	MinRaise    int  // 最小加注到的额度(raise-to 下限)
 	MyStack     int  // 当前剩余筹码(不含本街已投入)
 	MyBet       int  // 本街已投入
-	OpponentBet int  // 对手本街已投入
-	IsButton    bool // 是否为按钮(SB)位
+	OpponentBet int  // 对手本街已投入(Heads-up 语义;多人时仅参考)
+	IsButton    bool // 是否为按钮位
+	NumPlayers  int  // 桌上总人数(含已弃牌)
+	Position    string // 座位位置标签:"BTN"/"SB"/"BB"/"UTG"/"UTG+1"/...
 }
 
 // EventType 是事件类型。
@@ -131,7 +133,7 @@ type HandResult struct {
 	PotWon      int           // 赢家总入账(平局时为人均,余数归首位已在 FinalStacks 体现)
 	Folded      bool          // 是否因弃牌结束
 	Showdown    *ShowdownInfo // 摊牌时非 nil
-	FinalStacks [2]int        // 结算后两人筹码(便于校验守恒)
+	FinalStacks []int         // 结算后各 seat 筹码(便于校验守恒),长度 = seat 数
 }
 
 // ShowdownInfo 是摊牌细节。
@@ -143,26 +145,36 @@ type ShowdownInfo struct {
 // handState 是一手牌的内部可变状态。
 type handState struct {
 	cfg       Config
-	seats     [2]PlayerSeat
-	stacks    [2]int // 实时筹码(扣除已投入)
-	bets      [2]int // 本街已投入
-	hole      [2][]Card
+	seats     []PlayerSeat
+	stacks    []int   // 实时筹码(扣除已投入)
+	bets      []int   // 本街已投入
+	hole      [][]Card
 	community []Card
 	pot       int
 	street    Street
-	button    int // 按钮位 = SB 位
-	sb, bb    int // SB / BB 的 seat 索引
-	folded    [2]bool
-	allIn     [2]bool
+	button    int   // 按钮位 seat 索引
+	sb        int   // SB 的 seat 索引
+	bb        int   // BB 的 seat 索引
+	folded    []bool
+	allIn     []bool
 	handID    int
 	deck      *Deck
 }
 
 // setupHand 初始化一手牌:扣盲注、发底牌,返回内部状态与初始事件。
-// button=0 表示 seat0 是按钮(SB),button=1 表示 seat1 是按钮。
-func setupHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) (*handState, []Event) {
-	if button != 0 && button != 1 {
-		panic("setupHand: button must be 0 or 1")
+//   seats   长度 2-6
+//   button  按钮位 seat 索引
+//
+// 盲注位:
+//   N=2(Heads-up):sb = button,bb = 1-button(保留 Heads-up 特例)
+//   N>=3:sb = (button+1)%N,bb = (button+2)%N(标准多人桌规则)
+func setupHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) (*handState, []Event) {
+	n := len(seats)
+	if n < 2 || n > 6 {
+		panic("setupHand: seats length must be in [2,6]")
+	}
+	if button < 0 || button >= n {
+		panic("setupHand: button out of range")
 	}
 	if cfg.SmallBlind <= 0 || cfg.BigBlind <= cfg.SmallBlind {
 		panic("setupHand: invalid blinds")
@@ -171,8 +183,14 @@ func setupHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, hand
 		panic("setupHand: starting stack smaller than big blind")
 	}
 
-	sb := button
-	bb := 1 - button
+	var sb, bb int
+	if n == 2 {
+		sb = button
+		bb = 1 - button
+	} else {
+		sb = (button + 1) % n
+		bb = (button + 2) % n
+	}
 
 	st := &handState{
 		cfg:    cfg,
@@ -182,12 +200,17 @@ func setupHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, hand
 		handID: handID,
 		street: Preflop,
 		deck:   NewDeck(WithRand(rng)),
+		seats:  append([]PlayerSeat(nil), seats...),
+		stacks: make([]int, n),
+		bets:   make([]int, n),
+		hole:   make([][]Card, n),
+		folded: make([]bool, n),
+		allIn:  make([]bool, n),
 	}
 	st.deck.Shuffle() // 构造的 deck 是顺序的,必须洗牌否则发牌固定
-	st.seats[0] = seats[0]
-	st.seats[1] = seats[1]
-	st.stacks[0] = seats[0].Stack
-	st.stacks[1] = seats[1].Stack
+	for i, s := range seats {
+		st.stacks[i] = s.Stack
+	}
 
 	var events []Event
 
@@ -196,10 +219,10 @@ func setupHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, hand
 	bbAmt := postBlind(st, bb, cfg.BigBlind)
 	events = append(events, Event{Type: BlindPosted, Seat: bb, Amount: bbAmt, Message: "big blind"})
 
-	st.hole[0] = drawN(st.deck, 2)
-	st.hole[1] = drawN(st.deck, 2)
-	events = append(events, Event{Type: DealtHole, Seat: 0, Cards: st.hole[0]})
-	events = append(events, Event{Type: DealtHole, Seat: 1, Cards: st.hole[1]})
+	for i := 0; i < n; i++ {
+		st.hole[i] = drawN(st.deck, 2)
+		events = append(events, Event{Type: DealtHole, Seat: i, Cards: st.hole[i]})
+	}
 
 	return st, events
 }
@@ -229,12 +252,15 @@ func drawN(d *Deck, n int) []Card {
 	return out
 }
 
-// currentMaxBet 返回本街两人中的最高下注。
+// currentMaxBet 返回本街所有玩家中的最高下注。
 func (st *handState) currentMaxBet() int {
-	if st.bets[0] > st.bets[1] {
-		return st.bets[0]
+	max := 0
+	for _, b := range st.bets {
+		if b > max {
+			max = b
+		}
 	}
-	return st.bets[1]
+	return max
 }
 
 // toCallFor 返回某 seat 跟注需补多少(= 本街最高下注 - 自己本街已投入,下限 0)。
@@ -251,37 +277,95 @@ func (st *handState) minRaiseTo() int {
 	return st.currentMaxBet() + st.cfg.BigBlind
 }
 
+// positionLabel 返回某 seat 的位置标签(用于 Observation.Position)。
+func (st *handState) positionLabel(seat int) string {
+	switch seat {
+	case st.button:
+		return "BTN"
+	case st.sb:
+		return "SB"
+	case st.bb:
+		return "BB"
+	default:
+		// N>3 时其他位按距 BB 的偏移命名
+		return "UTG"
+	}
+}
+
 // buildObservation 构造给某 seat 的可见信息。
+// OpponentBet 在 Heads-up 语义下指对手;多人时仅填第一个未弃牌非自己 seat,
+// 多人语义在后续 task 完善(LLM prompt 仅作参考用)。
 func (st *handState) buildObservation(seat int) Observation {
-	opp := 1 - seat
+	oppBet := 0
+	for i, b := range st.bets {
+		if i != seat && b > oppBet {
+			oppBet = b
+		}
+	}
+	potTotal := st.pot
+	for _, b := range st.bets {
+		potTotal += b
+	}
 	return Observation{
 		HandID:      st.handID,
 		Street:      st.street,
 		HoleCards:   st.hole[seat],
 		Community:   st.community,
-		Pot:         st.pot + st.bets[0] + st.bets[1],
+		Pot:         potTotal,
 		ToCall:      st.toCallFor(seat),
 		MinRaise:    st.minRaiseTo(),
 		MyStack:     st.stacks[seat],
 		MyBet:       st.bets[seat],
-		OpponentBet: st.bets[opp],
+		OpponentBet: oppBet,
 		IsButton:    seat == st.button,
+		NumPlayers:  len(st.seats),
+		Position:    st.positionLabel(seat),
 	}
 }
 
-// firstActor 返回本街的第一个行动者。Preflop: SB(按钮)先;Postflop: BB 先。
+// firstActor 返回本街的第一个行动者。
+//   N=2(Heads-up):preflop SB(=button)先,postflop BB 先(原 Heads-up 规则)
+//   N>=3:preflop bb+1 先,postflop button+1 先(顺时针,跳过弃牌)
+//   后续 task 完善多人的"跳过弃牌"细节;此处只给起点。
 func (st *handState) firstActor() int {
-	if st.street == Preflop {
-		return st.sb
+	n := len(st.seats)
+	if n == 2 {
+		if st.street == Preflop {
+			return st.sb
+		}
+		return st.bb
 	}
-	return st.bb
+	if st.street == Preflop {
+		return (st.bb + 1) % n
+	}
+	return (st.button + 1) % n
 }
 
-// betsEqual 返回两人本街下注是否相等。
-func (st *handState) betsEqual() bool { return st.bets[0] == st.bets[1] }
+// betsAllEqual 返回所有未弃牌玩家的本街下注是否相等。
+func (st *handState) betsAllEqual() bool {
+	ref := -1
+	for i, b := range st.bets {
+		if st.folded[i] || st.allIn[i] {
+			continue
+		}
+		if ref == -1 {
+			ref = b
+		} else if b != ref {
+			return false
+		}
+	}
+	return true
+}
 
-// runStreet 跑完一个 street 的下注轮,把 ActionTaken 事件追加到 events 并返回。
+// runStreet 跑完一个 street 的下注轮。当前实现保留 Heads-up 双人循环语义
+// (N=2 正确);N>3 的多人行动顺序、acted 清空等逻辑留待后续 task。
 func (st *handState) runStreet(events []Event) []Event {
+	n := len(st.seats)
+	if n != 2 {
+		// 多人版 runStreet 在后续 task 实现;此处不可达,但保留 panic 防御
+		panic("runStreet: multi-player not yet implemented (use N=2)")
+	}
+
 	// 双方 all-in,跳过(由调用方处理剩余街)
 	if st.allIn[0] && st.allIn[1] {
 		return events
@@ -291,19 +375,15 @@ func (st *handState) runStreet(events []Event) []Event {
 	acted := [2]bool{false, false}
 
 	for {
-		// 一方已弃牌,立刻结束
 		if st.folded[0] || st.folded[1] {
 			break
 		}
-		// 双方都 all-in,结束
 		if st.allIn[0] && st.allIn[1] {
 			break
 		}
-		// 行动者已 all-in,跳过并把 acted 置位
 		if st.allIn[actor] {
 			acted[actor] = true
-			// 若两人都行动过且下注相等,结束
-			if acted[0] && acted[1] && st.betsEqual() {
+			if acted[0] && acted[1] && st.betsAllEqual() {
 				break
 			}
 			actor = 1 - actor
@@ -319,11 +399,9 @@ func (st *handState) runStreet(events []Event) []Event {
 		if action.Type == Fold {
 			break
 		}
-		// 终止:两人都行动过且下注相等
-		if acted[0] && acted[1] && st.betsEqual() {
+		if acted[0] && acted[1] && st.betsAllEqual() {
 			break
 		}
-		// 双方都 all-in,结束
 		if st.allIn[0] && st.allIn[1] {
 			break
 		}
@@ -379,9 +457,10 @@ func (st *handState) applyAction(seat int, a Action) (allIn bool, ev Event) {
 // Preflop→Flop(3 张),Flop→Turn(1 张),Turn→River(1 张),River→Showdown(不翻牌)。
 func (st *handState) advanceStreet(events []Event) []Event {
 	// 把本街 bets 清零并入 pot
-	st.pot += st.bets[0] + st.bets[1]
-	st.bets[0] = 0
-	st.bets[1] = 0
+	for i := range st.bets {
+		st.pot += st.bets[i]
+		st.bets[i] = 0
+	}
 
 	switch st.street {
 	case Preflop:
@@ -407,6 +486,7 @@ func (st *handState) advanceStreet(events []Event) []Event {
 }
 
 // settleShowdown 用 Evaluate/Best5 定赢家,返回(赢家列表, ShowdownInfo)。
+// 仅在 Heads-up(N=2)下使用;多人版在后续 task 改造(需走 sidepot)。
 func (st *handState) settleShowdown() ([]int, ShowdownInfo) {
 	all0 := append(append([]Card{}, st.hole[0]...), st.community...)
 	all1 := append(append([]Card{}, st.hole[1]...), st.community...)
@@ -444,10 +524,53 @@ func (st *handState) awardPot(winners []int) {
 	st.pot = 0
 }
 
-// PlayHand 完整跑完一手 Heads-up 牌,返回事件流与结算结果。
-// button=0 表示 seat0 是按钮(SB)。
-func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) ([]Event, HandResult) {
+// potTotal 返回当前 pot + 所有未结算的本街 bets。
+func (st *handState) potTotal() int {
+	t := st.pot
+	for _, b := range st.bets {
+		t += b
+	}
+	return t
+}
+
+// clearBets 把本街 bets 全部并入 pot 并清零(用于 fold/结算路径)。
+func (st *handState) absorbBets() {
+	for i := range st.bets {
+		st.pot += st.bets[i]
+		st.bets[i] = 0
+	}
+}
+
+// anyAllIn 返回是否有任一玩家 all-in。
+func (st *handState) anyAllIn() bool {
+	for _, a := range st.allIn {
+		if a {
+			return true
+		}
+	}
+	return false
+}
+
+// PlayHand 完整跑完一手牌,返回事件流与结算结果。
+//
+// 当前实现支持 Heads-up(N=2,完整正确);N>=3 的多人逻辑(runStreet 行动顺序、
+// sidepot 结算)在后续 task 落地。N!=2 时 panic。
+//
+// button 是按钮位 seat 索引。
+func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) ([]Event, HandResult) {
+	if len(seats) != 2 {
+		panic("PlayHand: multi-player not yet implemented (use N=2)")
+	}
 	st, events := setupHand(seats, button, cfg, rng, handID)
+
+	finishByFold := func(winner int) ([]Event, HandResult) {
+		pot := st.potTotal()
+		events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: pot})
+		st.absorbBets()
+		st.awardPot([]int{winner})
+		events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
+		return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true, FinalStacks: append([]int(nil), st.stacks...)}
+	}
 
 	for {
 		// 一方已弃牌(理论上 setupHand 后不会立即 fold,但 runStreet 后可能)
@@ -456,14 +579,7 @@ func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 			if st.folded[0] {
 				winner = 1
 			}
-			pot := st.pot + st.bets[0] + st.bets[1]
-			events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: pot})
-			st.pot = pot
-			st.bets[0] = 0
-			st.bets[1] = 0
-			st.awardPot([]int{winner})
-			events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
-			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true, FinalStacks: st.stacks}
+			return finishByFold(winner)
 		}
 
 		events = st.runStreet(events)
@@ -474,18 +590,11 @@ func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 			if st.folded[0] {
 				winner = 1
 			}
-			pot := st.pot + st.bets[0] + st.bets[1]
-			events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: pot})
-			st.pot = pot
-			st.bets[0] = 0
-			st.bets[1] = 0
-			st.awardPot([]int{winner})
-			events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
-			return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true, FinalStacks: st.stacks}
+			return finishByFold(winner)
 		}
 
 		// 若任一方 all-in,跳过决策,翻完剩余 street
-		if st.allIn[0] || st.allIn[1] {
+		if st.anyAllIn() {
 			for st.street != Showdown {
 				events = st.advanceStreet(events)
 			}
@@ -499,12 +608,11 @@ func PlayHand(seats [2]PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 			events = append(events, Event{Type: PotAwarded, Winners: winners, Amount: pot})
 			st.awardPot(winners)
 			events = append(events, Event{Type: HandFinished, Winners: winners})
-			// PotWon:赢家拿走的总额(平局时报告平均,余数忽略)
 			potWon := pot
 			if len(winners) > 1 {
 				potWon = pot / len(winners)
 			}
-			return events, HandResult{Winners: winners, PotWon: potWon, Folded: false, Showdown: &info, FinalStacks: st.stacks}
+			return events, HandResult{Winners: winners, PotWon: potWon, Folded: false, Showdown: &info, FinalStacks: append([]int(nil), st.stacks...)}
 		}
 	}
 }

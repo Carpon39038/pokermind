@@ -98,7 +98,7 @@ func TestRuleBotNeverRaises(t *testing.T) {
 
 func TestRuleBotEndToEndPlayHand(t *testing.T) {
 	// RuleBot vs 总是 call 的对手,固定 seed,确保能跑完不 panic
-	seats := [2]PlayerSeat{
+	seats := []PlayerSeat{
 		{ID: 0, Stack: 1000, Player: RuleBot{}},
 		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
 	}
