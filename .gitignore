@@ -1,0 +1,20 @@
+# API keys / secrets —— 绝不入 git
+.env
+.env.local
+*.env
+
+# Go
+/dist/
+/bin/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
