@@ -322,3 +322,233 @@ func (s *Store) Leaderboard() ([]LeaderboardRow, error) {
 	}
 	return out, rows.Err()
 }
+
+// GameSummary 是局列表页一行的数据。
+type GameSummary struct {
+	ID          int64  `json:"id"`
+	P1Label     string `json:"p1_label"`
+	P2Label     string `json:"p2_label"`
+	WinnerLabel string `json:"winner_label"` // 空串表示平局
+	IsDraw      bool   `json:"is_draw"`
+	HandsPlayed int    `json:"hands_played"`
+	StartedAt   string `json:"started_at"`
+	P1Final     int    `json:"p1_final"`
+	P2Final     int    `json:"p2_final"`
+}
+
+// ListGames 返回最近 limit 局(默认按 id desc)。limit<=0 时默认 100。
+func (s *Store) ListGames(limit int) ([]GameSummary, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT g.id, p1.label, p2.label,
+		       COALESCE(pw.label, '') AS winner_label,
+		       (g.winner_id IS NULL) AS is_draw,
+		       g.hands_played, g.started_at, g.p1_final_chips, g.p2_final_chips
+		FROM games g
+		JOIN players p1 ON p1.id = g.p1_id
+		JOIN players p2 ON p2.id = g.p2_id
+		LEFT JOIN players pw ON pw.id = g.winner_id
+		ORDER BY g.id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list games query: %w", err)
+	}
+	defer rows.Close()
+	var out []GameSummary
+	for rows.Next() {
+		var g GameSummary
+		if err := rows.Scan(&g.ID, &g.P1Label, &g.P2Label, &g.WinnerLabel, &g.IsDraw, &g.HandsPlayed, &g.StartedAt, &g.P1Final, &g.P2Final); err != nil {
+			return nil, fmt.Errorf("scan game summary: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// ActionDetail 是回放页一个动作的完整数据(含内心戏)。
+type ActionDetail struct {
+	Seq          int     `json:"seq"`
+	Street       string  `json:"street"`
+	Seat         int     `json:"seat"`
+	PlayerLabel  string  `json:"player_label"`
+	ActionType   string  `json:"action_type"`
+	Amount       int     `json:"amount"`
+	PotBefore    int     `json:"pot_before"`
+	ToCall       int     `json:"to_call"`
+	HasReport    bool    `json:"has_report"`
+	Reasoning    string  `json:"reasoning"`
+	HandStrength float64 `json:"hand_strength"`
+	EstEquity    float64 `json:"estimated_equity"`
+	IsBluffing   bool    `json:"is_bluffing"`
+}
+
+// HandDetail 是回放页一手牌的完整数据。
+type HandDetail struct {
+	HandIndex   int            `json:"hand_index"`
+	ButtonSeat  int            `json:"button_seat"`
+	Folded      bool           `json:"folded"`
+	Pot         int            `json:"pot"`
+	WinnerLabel string         `json:"winner_label"` // 空串表示平局
+	IsDraw      bool           `json:"is_draw"`
+	P1Hole      string         `json:"p1_hole"`
+	P2Hole      string         `json:"p2_hole"`
+	Community   string         `json:"community"`
+	Actions     []ActionDetail `json:"actions"`
+}
+
+// GameDetail 是单局完整明细(回放页主体数据)。
+type GameDetail struct {
+	ID          int64        `json:"id"`
+	P1Label     string       `json:"p1_label"`
+	P2Label     string       `json:"p2_label"`
+	P1PlayerID  int64        `json:"p1_player_id"`
+	P2PlayerID  int64        `json:"p2_player_id"`
+	WinnerLabel string       `json:"winner_label"`
+	IsDraw      bool         `json:"is_draw"`
+	HandsPlayed int          `json:"hands_played"`
+	StartedAt   string       `json:"started_at"`
+	FinishedAt  string       `json:"finished_at"`
+	P1Final     int          `json:"p1_final"`
+	P2Final     int          `json:"p2_final"`
+	Hands       []HandDetail `json:"hands"`
+}
+
+// GetGame 返回单局完整明细(含所有手与动作)。局不存在返回 (nil, nil)。
+func (s *Store) GetGame(gameID int64) (*GameDetail, error) {
+	// 先拉局元信息
+	var g GameDetail
+	var winnerLabel sql.NullString
+	err := s.db.QueryRow(`
+		SELECT g.id, p1.label, p2.label, g.p1_id, g.p2_id,
+		       COALESCE(pw.label, ''), (g.winner_id IS NULL),
+		       g.hands_played, g.started_at, g.finished_at,
+		       g.p1_final_chips, g.p2_final_chips
+		FROM games g
+		JOIN players p1 ON p1.id = g.p1_id
+		JOIN players p2 ON p2.id = g.p2_id
+		LEFT JOIN players pw ON pw.id = g.winner_id
+		WHERE g.id = ?
+	`, gameID).Scan(
+		&g.ID, &g.P1Label, &g.P2Label, &g.P1PlayerID, &g.P2PlayerID,
+		&winnerLabel, &g.IsDraw,
+		&g.HandsPlayed, &g.StartedAt, &g.FinishedAt,
+		&g.P1Final, &g.P2Final,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get game query: %w", err)
+	}
+	g.WinnerLabel = winnerLabel.String
+
+	// 一次 JOIN 拉所有 hands + actions,Go 侧按 hand_index 分组
+	rows, err := s.db.Query(`
+		SELECT h.hand_index, h.button_seat, h.folded, h.pot,
+		       COALESCE(ph.label, '') AS winner_label,
+		       (h.winner_id IS NULL) AS is_draw,
+		       h.p1_hole, h.p2_hole, h.community,
+		       a.seq, a.street, a.seat, pa.label,
+		       a.action_type, a.amount, a.pot_before, a.to_call,
+		       a.reasoning, a.hand_strength, a.estimated_equity, a.is_bluffing
+		FROM hands h
+		LEFT JOIN players ph ON ph.id = h.winner_id
+		LEFT JOIN actions a ON a.hand_id = h.id
+		LEFT JOIN players pa ON pa.id = a.player_id
+		WHERE h.game_id = ?
+		ORDER BY h.hand_index, a.seq
+	`, gameID)
+	if err != nil {
+		return nil, fmt.Errorf("get hands+actions query: %w", err)
+	}
+	defer rows.Close()
+
+	// 按 hand_index 累积;每个新 hand_index 出现时开一个 HandDetail
+	handByIndex := map[int]*HandDetail{}
+	var handOrder []int
+	for rows.Next() {
+		var (
+			handIndex                 int
+			buttonSeat                int
+			folded                    int
+			pot                       int
+			handWinnerLabel           sql.NullString
+			isDraw                    int
+			p1Hole, p2Hole, community string
+			// action 列(可能全 NULL 当该 hand 无动作)
+			seq          sql.NullInt64
+			street       sql.NullString
+			seat         sql.NullInt64
+			playerLabel  sql.NullString
+			actionType   sql.NullString
+			amount       sql.NullInt64
+			potBefore    sql.NullInt64
+			toCall       sql.NullInt64
+			reasoning    sql.NullString
+			handStrength sql.NullFloat64
+			estEquity    sql.NullFloat64
+			isBluffing   sql.NullInt64
+		)
+		if err := rows.Scan(
+			&handIndex, &buttonSeat, &folded, &pot,
+			&handWinnerLabel, &isDraw,
+			&p1Hole, &p2Hole, &community,
+			&seq, &street, &seat, &playerLabel,
+			&actionType, &amount, &potBefore, &toCall,
+			&reasoning, &handStrength, &estEquity, &isBluffing,
+		); err != nil {
+			return nil, fmt.Errorf("scan hand+action row: %w", err)
+		}
+
+		hd, ok := handByIndex[handIndex]
+		if !ok {
+			hd = &HandDetail{
+				HandIndex:   handIndex,
+				ButtonSeat:  buttonSeat,
+				Folded:      folded == 1,
+				Pot:         pot,
+				WinnerLabel: handWinnerLabel.String,
+				IsDraw:      isDraw == 1,
+				P1Hole:      p1Hole,
+				P2Hole:      p2Hole,
+				Community:   community,
+			}
+			handByIndex[handIndex] = hd
+			handOrder = append(handOrder, handIndex)
+		}
+
+		// 动作列非空则追加
+		if seq.Valid {
+			ad := ActionDetail{
+				Seq:         int(seq.Int64),
+				Street:      street.String,
+				Seat:        int(seat.Int64),
+				PlayerLabel: playerLabel.String,
+				ActionType:  actionType.String,
+				Amount:      int(amount.Int64),
+				PotBefore:   int(potBefore.Int64),
+				ToCall:      int(toCall.Int64),
+			}
+			if reasoning.Valid {
+				ad.HasReport = true
+				ad.Reasoning = reasoning.String
+				ad.HandStrength = handStrength.Float64
+				ad.EstEquity = estEquity.Float64
+				ad.IsBluffing = isBluffing.Int64 == 1
+			}
+			hd.Actions = append(hd.Actions, ad)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iter hand+action rows: %w", err)
+	}
+
+	g.Hands = make([]HandDetail, 0, len(handOrder))
+	for _, idx := range handOrder {
+		g.Hands = append(g.Hands, *handByIndex[idx])
+	}
+	return &g, nil
+}

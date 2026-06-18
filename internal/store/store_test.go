@@ -173,3 +173,163 @@ func TestRecordGameAtomicRollbackOnError(t *testing.T) {
 		}
 	}
 }
+
+func TestListGamesEmpty(t *testing.T) {
+	s := freshStore(t)
+	games, err := s.ListGames(0)
+	if err != nil {
+		t.Fatalf("ListGames: %v", err)
+	}
+	if len(games) != 0 {
+		t.Fatalf("empty db ListGames len = %d, want 0", len(games))
+	}
+}
+
+func TestListGamesReturnsRecentFirst(t *testing.T) {
+	s := freshStore(t)
+	p1, _ := s.RegisterPlayer("a", "x", "ax")
+	p2, _ := s.RegisterPlayer("a", "y", "ay")
+	// 写 3 局
+	for i := 0; i < 3; i++ {
+		_, err := s.RecordGame(GameRecord{
+			P1ID: p1, P2ID: p2,
+			HandsPlayed: 1, WinnerPID: p1,
+			P1FinalChips: 1100, P2FinalChips: 900,
+			StartedAt: time.Now(), FinishedAt: time.Now(),
+			ConfigJSON: "{}",
+			Hands: []HandRecord{{
+				HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 10,
+				P1Hole: "", P2Hole: "", Community: "",
+			}},
+		})
+		if err != nil {
+			t.Fatalf("RecordGame %d: %v", i, err)
+		}
+	}
+	games, err := s.ListGames(0)
+	if err != nil {
+		t.Fatalf("ListGames: %v", err)
+	}
+	if len(games) != 3 {
+		t.Fatalf("len = %d, want 3", len(games))
+	}
+	// DESC:第一行应是最新(id 最大)
+	if games[0].ID <= games[2].ID {
+		t.Fatalf("expected DESC order, got ids %d %d %d", games[0].ID, games[1].ID, games[2].ID)
+	}
+	// label 正确填充
+	if games[0].P1Label != "ax" || games[0].P2Label != "ay" {
+		t.Fatalf("labels = %q/%q", games[0].P1Label, games[0].P2Label)
+	}
+	if games[0].WinnerLabel != "ax" {
+		t.Fatalf("winner label = %q, want ax", games[0].WinnerLabel)
+	}
+}
+
+func TestListGamesRespectsLimit(t *testing.T) {
+	s := freshStore(t)
+	p1, _ := s.RegisterPlayer("a", "x", "x")
+	p2, _ := s.RegisterPlayer("a", "y", "y")
+	for i := 0; i < 5; i++ {
+		_, _ = s.RecordGame(GameRecord{
+			P1ID: p1, P2ID: p2, HandsPlayed: 1, WinnerPID: p1,
+			P1FinalChips: 1000, P2FinalChips: 1000,
+			StartedAt: time.Now(), FinishedAt: time.Now(),
+			ConfigJSON: "{}",
+			Hands: []HandRecord{{HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 10}},
+		})
+	}
+	games, _ := s.ListGames(2)
+	if len(games) != 2 {
+		t.Fatalf("len = %d, want 2 (limit)", len(games))
+	}
+}
+
+func TestGetGameNotFound(t *testing.T) {
+	s := freshStore(t)
+	g, err := s.GetGame(9999)
+	if err != nil {
+		t.Fatalf("GetGame unknown should return (nil, nil), got err: %v", err)
+	}
+	if g != nil {
+		t.Fatalf("GetGame unknown should return nil, got %+v", g)
+	}
+}
+
+func TestGetGameFullTreeWithSelfReport(t *testing.T) {
+	s := freshStore(t)
+	p1, _ := s.RegisterPlayer("deepseek", "flash", "ds-flash")
+	p2, _ := s.RegisterPlayer("glm", "glm4", "glm4")
+	gameID, err := s.RecordGame(GameRecord{
+		P1ID: p1, P2ID: p2,
+		HandsPlayed: 2, WinnerPID: p1,
+		P1FinalChips: 1100, P2FinalChips: 900,
+		StartedAt: time.Now(), FinishedAt: time.Now(),
+		ConfigJSON: `{"sb":5}`,
+		Hands: []HandRecord{
+			{
+				HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 30,
+				P1Hole: "Ac Kc", P2Hole: "Qc Jc", Community: "",
+				Actions: []ActionRecord{
+					{Seq: 0, Street: "preflop", Seat: 0, PlayerID: p1, ActionType: "raise", Amount: 30, PotBefore: 15, ToCall: 5,
+						HasSelfReport: true, Reasoning: "premium AKs", HandStrength: 0.9, EstEquity: 0.65, IsBluffing: false},
+					{Seq: 1, Street: "preflop", Seat: 1, PlayerID: p2, ActionType: "fold", Amount: 0, PotBefore: 30, ToCall: 25,
+						HasSelfReport: false},
+				},
+			},
+			{
+				HandIndex: 2, ButtonSeat: 1, IsDraw: false, WinnerPID: p2, Folded: false, Pot: 50,
+				P1Hole: "Th Td", P2Hole: "2h 7c", Community: "5s 9d Kc",
+				Actions: []ActionRecord{
+					{Seq: 0, Street: "flop", Seat: 1, PlayerID: p2, ActionType: "call", Amount: 0, PotBefore: 50, ToCall: 0,
+						HasSelfReport: true, Reasoning: "free card", HandStrength: 0.1, EstEquity: 0.15, IsBluffing: true},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RecordGame: %v", err)
+	}
+
+	g, err := s.GetGame(gameID)
+	if err != nil {
+		t.Fatalf("GetGame: %v", err)
+	}
+	if g == nil {
+		t.Fatalf("GetGame returned nil for existing game %d", gameID)
+	}
+	if g.P1Label != "ds-flash" || g.P2Label != "glm4" {
+		t.Fatalf("labels = %q/%q", g.P1Label, g.P2Label)
+	}
+	if g.WinnerLabel != "ds-flash" {
+		t.Fatalf("winner = %q, want ds-flash", g.WinnerLabel)
+	}
+	if len(g.Hands) != 2 {
+		t.Fatalf("hands len = %d, want 2", len(g.Hands))
+	}
+	// 第一手:2 个动作
+	h1 := g.Hands[0]
+	if h1.HandIndex != 1 || len(h1.Actions) != 2 {
+		t.Fatalf("hand1 index/actions = %d/%d", h1.HandIndex, len(h1.Actions))
+	}
+	if h1.P1Hole != "Ac Kc" || h1.Community != "" {
+		t.Fatalf("hand1 hole/community = %q/%q", h1.P1Hole, h1.Community)
+	}
+	// 第一手第一个动作带 self report
+	a := h1.Actions[0]
+	if !a.HasReport || a.Reasoning != "premium AKs" || a.HandStrength != 0.9 || a.IsBluffing {
+		t.Fatalf("hand1 action0 self-report wrong: %+v", a)
+	}
+	// 第一手第二个动作无 self report(rule-bot fold)
+	if g.Hands[0].Actions[1].HasReport {
+		t.Fatalf("hand1 action1 should have no report")
+	}
+	// 第二手:1 个动作 + 诈唬标记
+	h2 := g.Hands[1]
+	if len(h2.Actions) != 1 || !h2.Actions[0].IsBluffing {
+		t.Fatalf("hand2 bluff not captured: %+v", h2.Actions)
+	}
+	if h2.Community != "5s 9d Kc" {
+		t.Fatalf("hand2 community = %q", h2.Community)
+	}
+}
