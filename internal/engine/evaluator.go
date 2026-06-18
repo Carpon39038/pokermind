@@ -67,3 +67,106 @@ func (h HandRank) String() string {
 	}
 	return fmt.Sprintf("%s (%s)", h.Category, strings.Join(parts, " "))
 }
+
+// evaluate5 评估正好 5 张牌。cards 长度必须为 5,否则 panic。
+func evaluate5(cards []Card) HandRank {
+	if len(cards) != 5 {
+		panic("evaluate5: need exactly 5 cards")
+	}
+
+	// 统计点数频次与花色频次
+	rankCount := map[Rank]int{}
+	suitCount := map[Suit]int{}
+	ranks := make([]Rank, 5)
+	for i, c := range cards {
+		rankCount[c.Rank]++
+		suitCount[c.Suit]++
+		ranks[i] = c.Rank
+	}
+	isFlush := len(suitCount) == 1
+
+	// 顺子判定(处理 wheel:A-2-3-4-5)
+	straightHigh, ok := straightHighCard(ranks)
+	isStraight := ok
+
+	// 把 rank 频次按 (count 降序, rank 降序) 排序,作为 tiebreaker
+	type rc struct {
+		r Rank
+		n int
+	}
+	counts := make([]rc, 0, len(rankCount))
+	for r, n := range rankCount {
+		counts = append(counts, rc{r, n})
+	}
+	// 简单插入排序(规模 <=5)
+	for i := 1; i < len(counts); i++ {
+		for j := i; j > 0; j-- {
+			if counts[j].n > counts[j-1].n ||
+				(counts[j].n == counts[j-1].n && counts[j].r > counts[j-1].r) {
+				counts[j], counts[j-1] = counts[j-1], counts[j]
+			} else {
+				break
+			}
+		}
+	}
+	tb := make([]Rank, len(counts))
+	for i, c := range counts {
+		tb[i] = c.r
+	}
+
+	switch {
+	case isStraight && isFlush:
+		// 同花顺,wheel 用 5 作为高牌
+		return HandRank{Category: StraightFlush, Ranks: []Rank{straightHigh}}
+	case counts[0].n == 4:
+		return HandRank{Category: FourOfAKind, Ranks: tb[:2]}
+	case counts[0].n == 3 && counts[1].n == 2:
+		return HandRank{Category: FullHouse, Ranks: tb[:2]}
+	case isFlush:
+		return HandRank{Category: Flush, Ranks: sortedDesc(ranks)}
+	case isStraight:
+		return HandRank{Category: Straight, Ranks: []Rank{straightHigh}}
+	case counts[0].n == 3:
+		return HandRank{Category: ThreeOfAKind, Ranks: tb[:3]}
+	case counts[0].n == 2 && counts[1].n == 2:
+		return HandRank{Category: TwoPair, Ranks: tb[:3]}
+	case counts[0].n == 2:
+		return HandRank{Category: Pair, Ranks: tb[:4]}
+	default:
+		return HandRank{Category: HighCard, Ranks: sortedDesc(ranks)}
+	}
+}
+
+// straightHighCard 判断 ranks(长度 5)是否构成顺子。
+// 若是,返回(高牌点数, true)。wheel(A-2-3-4-5)返回 (5, true)。
+func straightHighCard(ranks []Rank) (Rank, bool) {
+	// 降序排序后的副本
+	s := make([]Rank, len(ranks))
+	copy(s, ranks)
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] > s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+	// 5 张不同点数且首尾相差 4 -> 顺子
+	if len(s) == 5 && s[0]-s[4] == 4 {
+		return s[0], true
+	}
+	// wheel: A(14) 5 4 3 2
+	if len(s) == 5 && s[0] == 14 && s[1] == 5 && s[2] == 4 && s[3] == 3 && s[4] == 2 {
+		return 5, true
+	}
+	return 0, false
+}
+
+// sortedDesc 返回 ranks 的降序副本。
+func sortedDesc(ranks []Rank) []Rank {
+	out := make([]Rank, len(ranks))
+	copy(out, ranks)
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] > out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
