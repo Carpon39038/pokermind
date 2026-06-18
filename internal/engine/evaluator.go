@@ -189,7 +189,8 @@ func bestCombo(cards []Card) (HandRank, []Card) {
 		panic(fmt.Sprintf("bestCombo: cards length %d out of [5,7]", len(cards)))
 	}
 	if len(cards) == 5 {
-		return evaluate5(cards), cards
+		cp := append([]Card(nil), cards...)
+		return evaluate5(cards), cp
 	}
 	var bestRank HandRank
 	var bestCards []Card

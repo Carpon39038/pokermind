@@ -208,7 +208,23 @@ func TestBest5MatchesEvaluate(t *testing.T) {
 	}
 }
 
-func TestEvaluateSevenPrefersFlushOverStraight(t *testing.T) {
+// TestBest5ReturnsActualStraightFlushCards 验证 Best5 不仅 rank 正确,
+// 而且确实返回了构成同花顺的那 5 张黑桃(而不是其它 rank 等价的 5 张)。
+func TestBest5ReturnsActualStraightFlushCards(t *testing.T) {
+	cards := []Card{
+		c(13, 0), c(12, 0), c(11, 0), c(10, 0), c(9, 0), // 5 spades
+		c(13, 1), c(13, 2), // 另两张 K,凑出 trips K 让 rank 容易混淆
+	}
+	got := Best5(cards)
+	// 必须全是黑桃(花色 0)
+	for _, card := range got {
+		if card.Suit != 0 {
+			t.Fatalf("Best5 returned non-spade %v, want all spades", card)
+		}
+	}
+}
+
+func TestEvaluateSevenPrefersStraightFlush(t *testing.T) {
 	// 5 张红心构成同花顺 + 2 张杂牌
 	cards := []Card{
 		c(10, 1), c(9, 1), c(8, 1), c(7, 1), c(6, 1),
