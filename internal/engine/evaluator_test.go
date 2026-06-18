@@ -151,3 +151,24 @@ func TestEvaluate5WheelStraightFlush(t *testing.T) {
 		t.Fatalf("got %v, want StraightFlush (wheel)", h.Category)
 	}
 }
+
+// TestEvaluate5PairNotStraight 防回归:含一对且排序后首尾相差 4 的牌
+// (如 6 6 4 3 2)不得被误判为顺子,必须是 Pair。
+func TestEvaluate5PairNotStraight(t *testing.T) {
+	h := evaluate5([]Card{c(6, 0), c(6, 1), c(4, 2), c(3, 3), c(2, 0)})
+	if h.Category != Pair || h.Ranks[0] != 6 {
+		t.Fatalf("got %v %v, want Pair(6 ...)", h.Category, h.Ranks)
+	}
+}
+
+// TestEvaluate5FullHouseTripLowerThanPair FullHouse 时 trip 的点数即使
+// 比 pair 小,Ranks 也必须是 [trip, pair] 顺序。
+func TestEvaluate5FullHouseTripLowerThanPair(t *testing.T) {
+	h := evaluate5([]Card{c(2, 0), c(2, 1), c(2, 2), c(14, 0), c(14, 2)})
+	if h.Category != FullHouse {
+		t.Fatalf("got %v, want FullHouse", h.Category)
+	}
+	if h.Ranks[0] != 2 || h.Ranks[1] != 14 {
+		t.Fatalf("full house ranks = %v, want [2 14]", h.Ranks)
+	}
+}

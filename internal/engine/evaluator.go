@@ -148,6 +148,17 @@ func straightHighCard(ranks []Rank) (Rank, bool) {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
+	// 必须是 5 张互不相同的点数
+	distinct := true
+	for i := 1; i < len(s); i++ {
+		if s[i] == s[i-1] {
+			distinct = false
+			break
+		}
+	}
+	if !distinct {
+		return 0, false
+	}
 	// 5 张不同点数且首尾相差 4 -> 顺子
 	if len(s) == 5 && s[0]-s[4] == 4 {
 		return s[0], true
