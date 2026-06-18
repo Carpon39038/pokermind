@@ -55,9 +55,20 @@ func (a ActionType) String() string {
 }
 
 // Action 是玩家决策。Amount 仅在 Type=Raise 时有效,含义为「加注到多少」(raise-to)。
+// SelfReport 由 LLMPlayer 填写(内心戏),RuleBot 等规则玩家留 nil。
 type Action struct {
-	Type   ActionType
-	Amount int
+	Type       ActionType
+	Amount     int
+	SelfReport *SelfReport
+}
+
+// SelfReport 是模型的内心戏(本项目的灵魂)。
+// PLAN §4:模型自评的手牌强度、自报的胜率、诈唬意图、推理过程。
+type SelfReport struct {
+	HandStrength    float64 // 0-1
+	EstimatedEquity float64 // 0-1
+	IsBluffing      bool
+	Reasoning       string
 }
 
 // Config 是一手牌的固定配置。
