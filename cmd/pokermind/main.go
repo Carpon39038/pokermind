@@ -39,7 +39,7 @@ Usage:
 
 Options:
   --provider    LLM provider: deepseek or glm (required)
-  --model       Model name (e.g. deepseek-chat, deepseek-reasoner, glm-4.6) (required)
+  --model       Model name (e.g. deepseek-v4-flash, deepseek-v4-pro, glm-4.6) (required)
   --hands       Number of hands to play (default 1)
   --seed        RNG seed for reproducible dealing (default 1)
 
@@ -71,7 +71,7 @@ func runCmd(args []string) {
 	case "deepseek":
 		llmPlayer = &players.LLMPlayer{
 			Provider: &providers.OpenAICompatProvider{
-				BaseURL: envStr("POKERMIND_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+				BaseURL: envStr("POKERMIND_DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 				APIKey:  mustEnv("POKERMIND_DEEPSEEK_API_KEY"),
 				HTTP:    httpClient,
 			},
