@@ -181,3 +181,54 @@ func sortedDesc(ranks []Rank) []Rank {
 	}
 	return out
 }
+
+// bestCombo 遍历 cards 的所有 C(n,5) 个 5 张组合,返回最强组合的 HandRank 与对应 5 张牌。
+// cards 长度必须在 [5,7]。
+func bestCombo(cards []Card) (HandRank, []Card) {
+	if len(cards) < 5 || len(cards) > 7 {
+		panic(fmt.Sprintf("bestCombo: cards length %d out of [5,7]", len(cards)))
+	}
+	if len(cards) == 5 {
+		return evaluate5(cards), cards
+	}
+	var bestRank HandRank
+	var bestCards []Card
+	first := true
+	// 用索引数组生成 5-组合(字典序)
+	idx := []int{0, 1, 2, 3, 4}
+	n := len(cards)
+	for {
+		combo := []Card{cards[idx[0]], cards[idx[1]], cards[idx[2]], cards[idx[3]], cards[idx[4]]}
+		r := evaluate5(combo)
+		if first || r.Compare(bestRank) > 0 {
+			bestRank = r
+			bestCards = combo
+			first = false
+		}
+		// 推进索引到下一个 5-组合
+		k := 4
+		for k >= 0 && idx[k] == n-5+k {
+			k--
+		}
+		if k < 0 {
+			break
+		}
+		idx[k]++
+		for j := k + 1; j < 5; j++ {
+			idx[j] = idx[j-1] + 1
+		}
+	}
+	return bestRank, bestCards
+}
+
+// Evaluate 从 5–7 张牌中选出最强 5 张组合并返回其 HandRank。
+func Evaluate(cards []Card) HandRank {
+	r, _ := bestCombo(cards)
+	return r
+}
+
+// Best5 返回构成最强牌型的 5 张牌(从输入中选出)。多组并列时任取一组。
+func Best5(cards []Card) []Card {
+	_, c := bestCombo(cards)
+	return c
+}

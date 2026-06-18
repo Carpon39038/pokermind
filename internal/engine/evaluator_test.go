@@ -172,3 +172,71 @@ func TestEvaluate5FullHouseTripLowerThanPair(t *testing.T) {
 		t.Fatalf("full house ranks = %v, want [2 14]", h.Ranks)
 	}
 }
+
+func TestEvaluateSixCardsPicksBestPair(t *testing.T) {
+	// 6 张:K K Q J 9 7,最强是 Pair(K),tiebreaker [Q J 9]
+	h := Evaluate([]Card{c(13, 0), c(13, 1), c(12, 2), c(11, 3), c(9, 0), c(7, 1)})
+	if h.Category != Pair || h.Ranks[0] != 13 {
+		t.Fatalf("got %v %v, want Pair(13 ...)", h.Category, h.Ranks)
+	}
+}
+
+func TestEvaluateSevenFindsStraightFlush(t *testing.T) {
+	// 7 张里藏一个 K-Q-J-T-9 同花顺,必须选它而非普通顺子/同花
+	cards := []Card{
+		c(13, 0), c(12, 0), c(11, 0), c(10, 0), c(9, 0), // spades K-high straight flush
+		c(8, 1), c(2, 2),
+	}
+	h := Evaluate(cards)
+	if h.Category != StraightFlush || h.Ranks[0] != 13 {
+		t.Fatalf("got %v %v, want StraightFlush(13)", h.Category, h.Ranks)
+	}
+}
+
+func TestBest5MatchesEvaluate(t *testing.T) {
+	cards := []Card{
+		c(13, 0), c(12, 0), c(11, 0), c(10, 0), c(9, 0),
+		c(8, 1), c(2, 2),
+	}
+	all := Evaluate(cards)
+	five := Evaluate(Best5(cards))
+	if all.Compare(five) != 0 {
+		t.Fatalf("Best5 rank %v != full Evaluate %v", five, all)
+	}
+	if len(Best5(cards)) != 5 {
+		t.Fatalf("Best5 len = %d, want 5", len(Best5(cards)))
+	}
+}
+
+func TestEvaluateSevenPrefersFlushOverStraight(t *testing.T) {
+	// 5 张红心构成同花顺 + 2 张杂牌
+	cards := []Card{
+		c(10, 1), c(9, 1), c(8, 1), c(7, 1), c(6, 1),
+		c(2, 0), c(3, 2),
+	}
+	h := Evaluate(cards)
+	if h.Category != StraightFlush {
+		t.Fatalf("got %v, want StraightFlush", h.Category)
+	}
+}
+
+func TestEvaluatePanicsOnTooFew(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for 4 cards")
+		}
+	}()
+	Evaluate([]Card{c(2, 0), c(3, 1), c(4, 2), c(5, 3)})
+}
+
+func TestEvaluatePanicsOnTooMany(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for 8 cards")
+		}
+	}()
+	Evaluate([]Card{
+		c(2, 0), c(3, 1), c(4, 2), c(5, 3), c(6, 0),
+		c(7, 1), c(8, 2), c(9, 3),
+	})
+}
