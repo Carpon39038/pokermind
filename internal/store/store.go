@@ -4,7 +4,6 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -323,6 +322,3 @@ func (s *Store) Leaderboard() ([]LeaderboardRow, error) {
 	}
 	return out, rows.Err()
 }
-
-// (未使用 strings 的话删掉 import —— 留着先,后面格式化可能用)
-var _ = strings.TrimSpace
