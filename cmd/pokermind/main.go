@@ -144,7 +144,7 @@ func runCmd(args []string) {
 		fmt.Printf("\n========== Hand #%d (seed=%d) ==========\n", h, *seed+int64(h-1))
 		rng := rand.New(rand.NewSource(*seed + int64(h-1)))
 
-		seats := [2]engine.PlayerSeat{
+		seats := []engine.PlayerSeat{
 			{ID: 0, Stack: cfg.StartingStack, Player: llmPlayer},
 			{ID: 1, Stack: cfg.StartingStack, Player: engine.RuleBot{}},
 		}
