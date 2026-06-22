@@ -50,7 +50,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `pokermind — multi-LLM Texas Hold'em arena
 
 Usage:
-  pokermind run --provider <deepseek|glm> --model <name> [options]
+  pokermind run --provider <name> --model <name> [options]
       Play N hands of <LLM> vs RuleBot, print each action + reasoning.
 
   pokermind match --p1 <provider:model> --p2 <provider:model> [options]
@@ -63,10 +63,11 @@ Usage:
       Start the web UI (game replay viewer) on http://localhost:8080.
 
 run options:
-  --provider    deepseek or glm (required)
+  --provider    provider name configured at /#/providers or via .env (required)
   --model       e.g. deepseek-v4-flash, deepseek-v4-pro, glm-4.6 (required)
   --hands       Number of hands (default 1)
   --seed        RNG seed (default 1)
+  --db          SQLite path (default pokermind.db)
 
 match options:
   --p1, --p2    player spec as provider:model (e.g. deepseek:deepseek-v4-flash)
@@ -82,27 +83,55 @@ Env (see .env.example):
 }
 
 // newLLMPlayer 按 provider+model 构造一个 *players.LLMPlayer。
-// provider 缺 key/未知时返回 error。
-func newLLMPlayer(provider, model string, httpClient *http.Client) (*players.LLMPlayer, error) {
-	var baseURL, apiKey string
-	switch provider {
-	case "deepseek":
-		baseURL = envStr("POKERMIND_DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-		apiKey = mustEnv("POKERMIND_DEEPSEEK_API_KEY")
-	case "glm":
-		baseURL = envStr("POKERMIND_GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-		apiKey = mustEnv("POKERMIND_GLM_API_KEY")
-	default:
-		return nil, fmt.Errorf("unknown provider %q (want deepseek or glm)", provider)
+// provider 配置从 store 读出;provider 不存在或缺 key 时返回 error。
+func newLLMPlayer(rec *store.Store, providerName, model string, httpClient *http.Client) (*players.LLMPlayer, error) {
+	cfg, err := rec.GetProviderByName(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("query provider %q: %w", providerName, err)
 	}
-	return &players.LLMPlayer{
-		Provider: &providers.OpenAICompatProvider{
-			BaseURL: baseURL,
-			APIKey:  apiKey,
-			HTTP:    httpClient,
-		},
-		Model: model,
-	}, nil
+	if cfg == nil {
+		return nil, fmt.Errorf("provider %q not found (configure at /#/providers or check .env)", providerName)
+	}
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("provider %q has empty api_key", providerName)
+	}
+	p, err := providers.ByKind(cfg.Kind, cfg.BaseURL, cfg.APIKey, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("provider %q kind %q: %w", providerName, cfg.Kind, err)
+	}
+	return &players.LLMPlayer{Provider: p, Model: model}, nil
+}
+
+// migrateProvidersFromEnv 把 .env 里的 POKERMIND_DEEPSEEK_API_KEY 和 POKERMIND_GLM_API_KEY
+// 一次性迁移到 store.providers 表。幂等:已在库里的同名 provider 不覆盖。
+func migrateProvidersFromEnv(rec *store.Store) error {
+	type env struct {
+		name, kind, defaultURL, keyEnv, urlEnv string
+	}
+	items := []env{
+		{name: "deepseek", kind: "openai", defaultURL: "https://api.deepseek.com",
+			keyEnv: "POKERMIND_DEEPSEEK_API_KEY", urlEnv: "POKERMIND_DEEPSEEK_BASE_URL"},
+		{name: "glm", kind: "openai", defaultURL: "https://open.bigmodel.cn/api/paas/v4",
+			keyEnv: "POKERMIND_GLM_API_KEY", urlEnv: "POKERMIND_GLM_BASE_URL"},
+	}
+	for _, it := range items {
+		key := os.Getenv(it.keyEnv)
+		if key == "" {
+			continue
+		}
+		existing, err := rec.GetProviderByName(it.name)
+		if err != nil {
+			return fmt.Errorf("migrate %s: %w", it.name, err)
+		}
+		if existing != nil {
+			continue
+		}
+		url := envStr(it.urlEnv, it.defaultURL)
+		if _, err := rec.UpsertProvider(it.name, it.kind, url, key); err != nil {
+			return fmt.Errorf("migrate %s upsert: %w", it.name, err)
+		}
+	}
+	return nil
 }
 
 // parsePlayerSpec 把 "deepseek:deepseek-v4-flash" 拆成 (provider, model)。
@@ -116,10 +145,11 @@ func parsePlayerSpec(spec string) (provider, model string, err error) {
 
 func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	provider := fs.String("provider", "", "LLM provider: deepseek or glm")
+	provider := fs.String("provider", "", "LLM provider name (configured at /#/providers)")
 	model := fs.String("model", "", "model name")
 	hands := fs.Int("hands", 1, "number of hands to play")
 	seed := fs.Int64("seed", 1, "RNG seed")
+	dbPath := fs.String("db", "pokermind.db", "SQLite path (for provider config)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -131,7 +161,17 @@ func runCmd(args []string) {
 	timeoutSec := envInt("POKERMIND_HTTP_TIMEOUT_SECONDS", 60)
 	httpClient := providers.DefaultHTTPClient(timeoutSec)
 
-	llmPlayer, err := newLLMPlayer(*provider, *model, httpClient)
+	rec, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
+	defer rec.Close()
+	if err := migrateProvidersFromEnv(rec); err != nil {
+		fmt.Fprintln(os.Stderr, "WARN migrate providers:", err)
+	}
+
+	llmPlayer, err := newLLMPlayer(rec, *provider, *model, httpClient)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
@@ -200,6 +240,16 @@ func matchCmd(args []string) {
 	timeoutSec := envInt("POKERMIND_HTTP_TIMEOUT_SECONDS", 60)
 	httpClient := providers.DefaultHTTPClient(timeoutSec)
 
+	rec, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		os.Exit(1)
+	}
+	defer rec.Close()
+	if err := migrateProvidersFromEnv(rec); err != nil {
+		fmt.Fprintln(os.Stderr, "WARN migrate providers:", err)
+	}
+
 	for _, specStr := range specStrs {
 		prov, model, err := parsePlayerSpec(specStr)
 		if err != nil {
@@ -210,7 +260,7 @@ func matchCmd(args []string) {
 		// 捕获循环变量(避免闭包陷阱)
 		p, m := prov, model
 		makePlayers = append(makePlayers, func() engine.Player {
-			player, err := newLLMPlayer(p, m, httpClient)
+			player, err := newLLMPlayer(rec, p, m, httpClient)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "ERROR:", err)
 				os.Exit(1)
@@ -218,13 +268,6 @@ func matchCmd(args []string) {
 			return player
 		})
 	}
-
-	rec, err := store.Open(*dbPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err)
-		os.Exit(1)
-	}
-	defer rec.Close()
 
 	// 打印对局标题
 	labels := make([]string, len(specs))
@@ -296,6 +339,9 @@ func serveCmd(args []string) {
 		os.Exit(1)
 	}
 	defer rec.Close()
+	if err := migrateProvidersFromEnv(rec); err != nil {
+		fmt.Fprintln(os.Stderr, "WARN migrate providers:", err)
+	}
 
 	srv := server.New(rec, *webDir)
 	fmt.Printf("PokerMind web UI: http://localhost%s/  (db=%s, web=%s)\n", *addr, *dbPath, *webDir)
