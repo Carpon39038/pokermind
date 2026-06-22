@@ -4,7 +4,9 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -35,4 +37,17 @@ func DefaultHTTPClient(timeoutSec int) *http.Client {
 		timeoutSec = 60
 	}
 	return &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
+}
+
+// ByKind 按 kind 字符串构造 Provider。
+// kind 取值(大小写不敏感):"openai" | "anthropic"。
+func ByKind(kind, baseURL, apiKey string, http *http.Client) (Provider, error) {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "openai":
+		return &OpenAICompatProvider{BaseURL: baseURL, APIKey: apiKey, HTTP: http}, nil
+	case "anthropic":
+		return &AnthropicProvider{BaseURL: baseURL, APIKey: apiKey, HTTP: http}, nil
+	default:
+		return nil, fmt.Errorf("ByKind: unknown kind %q (want openai or anthropic)", kind)
+	}
 }
