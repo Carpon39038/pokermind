@@ -36,13 +36,21 @@ func seedTwoGames(t *testing.T, s *store.Store) (p1ID, p2ID int64) {
 	}
 	// 局 1:p1 赢,一手带动作
 	_, err = s.RecordGame(store.GameRecord{
-		P1ID: p1, P2ID: p2, HandsPlayed: 1, WinnerPID: p1,
-		P1FinalChips: 1100, P2FinalChips: 900,
-		StartedAt: time.Now(), FinishedAt: time.Now(),
-		ConfigJSON: "{}",
+		NumSeats:   2,
+		Seats:      []store.GameSeat{{PlayerID: p1, FinalChips: 1100, IsWinner: true}, {PlayerID: p2, FinalChips: 900, IsWinner: false}},
+		HandsPlayed: 1,
+		IsDraw:      false,
+		StartedAt:   time.Now(),
+		FinishedAt:  time.Now(),
+		ConfigJSON:  "{}",
 		Hands: []store.HandRecord{{
-			HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 30,
-			P1Hole: "Ac Kc", P2Hole: "Qc Jc", Community: "",
+			HandIndex:   1,
+			ButtonSeat:  0,
+			WinnerPID:   p1,
+			Folded:      true,
+			Pot:         30,
+			PlayerHoles: []string{"Ac Kc", "Qc Jc"},
+			Community:   "",
 			Actions: []store.ActionRecord{
 				{Seq: 0, Street: "preflop", Seat: 0, PlayerID: p1, ActionType: "raise", Amount: 30, PotBefore: 15, ToCall: 5,
 					HasSelfReport: true, Reasoning: "AKs", HandStrength: 0.9, EstEquity: 0.65, IsBluffing: false},
@@ -56,12 +64,20 @@ func seedTwoGames(t *testing.T, s *store.Store) (p1ID, p2ID int64) {
 	}
 	// 局 2:平局
 	_, err = s.RecordGame(store.GameRecord{
-		P1ID: p1, P2ID: p2, HandsPlayed: 1, IsDraw: true,
-		P1FinalChips: 1000, P2FinalChips: 1000,
-		StartedAt: time.Now(), FinishedAt: time.Now(),
-		ConfigJSON: "{}",
+		NumSeats:    2,
+		Seats:       []store.GameSeat{{PlayerID: p1, FinalChips: 1000, IsWinner: false}, {PlayerID: p2, FinalChips: 1000, IsWinner: false}},
+		HandsPlayed: 1,
+		IsDraw:      true,
+		StartedAt:   time.Now(),
+		FinishedAt:  time.Now(),
+		ConfigJSON:  "{}",
 		Hands: []store.HandRecord{{
-			HandIndex: 1, ButtonSeat: 0, IsDraw: true, Folded: true, Pot: 15,
+			HandIndex:   1,
+			ButtonSeat:  0,
+			IsDraw:      true,
+			Folded:      true,
+			Pot:         15,
+			PlayerHoles: []string{"", ""},
 		}},
 	})
 	if err != nil {
@@ -94,7 +110,14 @@ func TestHandleGamesList(t *testing.T) {
 	}
 	// DESC 顺序:局 2(平)在前
 	if !games[0].IsDraw {
-		t.Fatalf("first game should be the draw (newest), got winner=%q", games[0].WinnerLabel)
+		t.Fatalf("first game should be the draw (newest), got is_draw=%v", games[0].IsDraw)
+	}
+	// 检查新字段
+	if games[0].NumSeats != 2 {
+		t.Fatalf("num_seats = %d, want 2", games[0].NumSeats)
+	}
+	if len(games[0].Players) != 2 {
+		t.Fatalf("players len = %d, want 2", len(games[0].Players))
 	}
 }
 
@@ -128,11 +151,18 @@ func TestHandleGameDetailFound(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &g); err != nil {
 		t.Fatalf("unmarshal: %v; body: %s", err, rec.Body.String())
 	}
-	if g.P1Label != "ds-flash" {
-		t.Fatalf("p1 label = %q", g.P1Label)
+	// 检查新的 Players 结构
+	if len(g.Players) != 2 {
+		t.Fatalf("players len = %d, want 2", len(g.Players))
 	}
-	if g.WinnerLabel != "ds-flash" {
-		t.Fatalf("winner label = %q", g.WinnerLabel)
+	if g.Players[0].Label != "ds-flash" {
+		t.Fatalf("players[0] label = %q", g.Players[0].Label)
+	}
+	if !g.Players[0].IsWinner {
+		t.Fatalf("players[0] should be winner")
+	}
+	if g.NumSeats != 2 {
+		t.Fatalf("num_seats = %d, want 2", g.NumSeats)
 	}
 	if len(g.Hands) != 1 {
 		t.Fatalf("hands len = %d, want 1", len(g.Hands))

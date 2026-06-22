@@ -26,7 +26,7 @@ type Result struct {
 	Winner      int // 0=p1, 1=p2, -1=平局
 	FinalStacks []int
 	GameID      int64
-	EloChange   [2]float64 // [p1 delta, p2 delta]
+	EloChange   []float64 // 索引对应 seat (N=2 时长度 2)
 }
 
 // Play 跑一局。p1 是 seat0(makeP1() 每次 PlayHand 调用前构造一个新 Player
@@ -53,12 +53,14 @@ func Play(p1, p2 PlayerSpec, makeP1, makeP2 func() engine.Player, hands int, cfg
 		}
 	}
 
+	playerIDs := []int64{p1ID, p2ID}
 	stacks := []int{cfg.StartingStack, cfg.StartingStack}
 	rng := rand.New(rand.NewSource(rngSeed))
 	startedAt := time.Now()
 
 	gameRecord := store.GameRecord{
-		P1ID: p1ID, P2ID: p2ID,
+		NumSeats:   2,
+		Seats:      []store.GameSeat{}, // 填在下面
 		StartedAt:  startedAt,
 		ConfigJSON: configJSON(cfg, hands),
 	}
@@ -81,7 +83,7 @@ func Play(p1, p2 PlayerSpec, makeP1, makeP2 func() engine.Player, hands int, cfg
 		stacks = result.FinalStacks
 
 		// 翻译成 HandRecord
-		hr := translateHand(h, button, events, result, p1ID, p2ID)
+		hr := translateHand(h, button, events, result, playerIDs)
 		gameRecord.Hands = append(gameRecord.Hands, hr)
 		handsPlayed++
 	}
@@ -95,21 +97,18 @@ func Play(p1, p2 PlayerSpec, makeP1, makeP2 func() engine.Player, hands int, cfg
 	}
 
 	gameRecord.HandsPlayed = handsPlayed
-	gameRecord.P1FinalChips = stacks[0]
-	gameRecord.P2FinalChips = stacks[1]
-	gameRecord.FinishedAt = time.Now()
-	if winner == 0 {
-		gameRecord.WinnerPID = p1ID
-	} else if winner == 1 {
-		gameRecord.WinnerPID = p2ID
-	} else {
-		gameRecord.IsDraw = true
+	gameRecord.Seats = []store.GameSeat{
+		{PlayerID: p1ID, FinalChips: stacks[0], IsWinner: winner == 0},
+		{PlayerID: p2ID, FinalChips: stacks[1], IsWinner: winner == 1},
 	}
+	gameRecord.IsDraw = (winner == -1)
+	gameRecord.FinishedAt = time.Now()
 
 	out := &Result{
 		HandsPlayed: handsPlayed,
 		Winner:      winner,
 		FinalStacks: stacks,
+		EloChange:   make([]float64, 2),
 	}
 
 	// 落库 + 更新 ELO
@@ -134,45 +133,43 @@ func Play(p1, p2 PlayerSpec, makeP1, makeP2 func() engine.Player, hands int, cfg
 		new1, new2 := elo.Update(float64(elo1), float64(elo2), score, 0)
 		_ = rec.SetElo(p1ID, int(new1))
 		_ = rec.SetElo(p2ID, int(new2))
-		out.EloChange = [2]float64{new1 - float64(elo1), new2 - float64(elo2)}
+		out.EloChange[0] = new1 - float64(elo1)
+		out.EloChange[1] = new2 - float64(elo2)
 	}
 
 	return out, nil
 }
 
 // translateHand 把一手的 events + result 翻译成 store.HandRecord。
-func translateHand(handIndex, button int, events []engine.Event, result engine.HandResult, p1ID, p2ID int64) store.HandRecord {
+// playerIDs: seat 索引到 player ID 的映射(长度 2-6)。
+func translateHand(handIndex, button int, events []engine.Event, result engine.HandResult, playerIDs []int64) store.HandRecord {
 	hr := store.HandRecord{
-		HandIndex:  handIndex,
-		ButtonSeat: button,
-		Folded:     result.Folded,
-		Pot:        result.PotWon,
+		HandIndex:   handIndex,
+		ButtonSeat:  button,
+		Folded:      result.Folded,
+		Pot:         result.PotWon,
+		PlayerHoles: make([]string, len(playerIDs)), // 默认空字符串
 	}
 
 	// 摊牌时填赢家 ID;fold 时赢家也填(fold 后唯一的赢家)
-	// engine 的 Winners 是 seat 索引(0/1)。单赢家或平局。
+	// engine 的 Winners 是 seat 索引。单赢家或平局。
 	if len(result.Winners) == 1 {
 		seat := result.Winners[0]
-		if seat == 0 {
-			hr.WinnerPID = p1ID
-		} else {
-			hr.WinnerPID = p2ID
+		if seat >= 0 && seat < len(playerIDs) {
+			hr.WinnerPID = playerIDs[seat]
 		}
 	} else if len(result.Winners) > 1 {
 		hr.IsDraw = true
 	}
 
 	// 收集底牌 / 公共牌 / 动作
-	holeCards := [2][]engine.Card{}
 	var community []engine.Card
 	seq := 0
 	for _, ev := range events {
 		switch ev.Type {
 		case engine.DealtHole:
-			if ev.Seat == 0 {
-				holeCards[0] = append([]engine.Card{}, ev.Cards...)
-			} else if ev.Seat == 1 {
-				holeCards[1] = append([]engine.Card{}, ev.Cards...)
+			if ev.Seat >= 0 && ev.Seat < len(playerIDs) {
+				hr.PlayerHoles[ev.Seat] = cardsToStr(ev.Cards)
 			}
 		case engine.StreetAdvanced:
 			community = append(community, ev.Cards...)
@@ -184,7 +181,7 @@ func translateHand(handIndex, button int, events []engine.Event, result engine.H
 				Seq:        seq,
 				Street:     ev.Street.String(),
 				Seat:       ev.Seat,
-				PlayerID:   seatToPlayerID(ev.Seat, p1ID, p2ID),
+				PlayerID:   seatToPlayerID(ev.Seat, playerIDs),
 				ActionType: ev.Action.Type.String(),
 				Amount:     ev.Action.Amount,
 				// PotBefore / ToCall 暂留 0 —— engine.Event 未暴露,待后续在事件里补
@@ -201,17 +198,15 @@ func translateHand(handIndex, button int, events []engine.Event, result engine.H
 		}
 	}
 
-	hr.P1Hole = cardsToStr(holeCards[0])
-	hr.P2Hole = cardsToStr(holeCards[1])
 	hr.Community = cardsToStr(community)
 	return hr
 }
 
-func seatToPlayerID(seat int, p1ID, p2ID int64) int64 {
-	if seat == 0 {
-		return p1ID
+func seatToPlayerID(seat int, playerIDs []int64) int64 {
+	if seat >= 0 && seat < len(playerIDs) {
+		return playerIDs[seat]
 	}
-	return p2ID
+	return 0 // 不应到达
 }
 
 func cardsToStr(cs []engine.Card) string {
@@ -235,21 +230,26 @@ func configJSON(cfg engine.Config, hands int) string {
 	return string(b)
 }
 
-// ResultN 是 N 人内存对局(PlayN)的产出。不落库,所以无 GameID/ELO 字段。
+// ResultN 是 N 人内存对局(PlayN)的产出。
+// 若 rec != nil 落库,则包含 GameID/EloChange/PlayerIDs。
 type ResultN struct {
 	HandsPlayed int
-	WinnerSeat  int   // 最终筹码最高的 seat(平局给顺位最先);-1 表示全部破产
-	FinalStacks []int // 每 seat 结算后筹码
+	WinnerSeat  int      // 最终筹码最高的 seat(平局给顺位最先);-1 表示全部破产
+	FinalStacks []int    // 每 seat 结算后筹码
+	GameID      int64    // 仅当 rec != nil 时有值
+	EloChange   []float64 // 仅当 rec != nil 时有值,索引对应 seat
+	PlayerIDs   []int64   // 仅当 rec != nil 时有值,索引对应 seat
 }
 
-// PlayN 跑一局 N 人(2-6)内存对局,不落库。
+// PlayN 跑一局 N 人(2-6)内存对局。
 //
-//   specs       N 个 PlayerSpec(仅用于未来扩展/日志,本函数不消费)
+//   specs       N 个 PlayerSpec
 //   makePlayers N 个 Player 工厂,每次 PlayHand 调用前重新构造(避免跨手状态)
 //   hands       计划手数;任一 seat 筹码 < BB 时提前结束
+//   rec         可选存储层;为 nil 时不落库,非 nil 时落库并更新 ELO
 //
-// 返回每 seat 最终筹码。ELO 更新需 store,在 Task 4 接入 PlayN+rec 后加。
-func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cfg engine.Config, rngSeed int64) (*ResultN, error) {
+// 返回每 seat 最终筹码。若 rec != nil,则包含 GameID/EloChange/PlayerIDs。
+func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cfg engine.Config, rngSeed int64, rec *store.Store) (*ResultN, error) {
 	n := len(specs)
 	if n < 2 || n > 6 {
 		return nil, fmt.Errorf("PlayN: need 2-6 specs, got %d", n)
@@ -264,11 +264,35 @@ func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cf
 		return nil, fmt.Errorf("PlayN: invalid blinds")
 	}
 
+	// 注册玩家(若需要落库)
+	var playerIDs []int64
+	if rec != nil {
+		playerIDs = make([]int64, n)
+		for i, spec := range specs {
+			id, err := rec.RegisterPlayer(spec.Provider, spec.Model, spec.Label)
+			if err != nil {
+				return nil, fmt.Errorf("register player %d: %w", i, err)
+			}
+			playerIDs[i] = id
+		}
+	} else {
+		// 占位,避免 translateHand 索引越界
+		playerIDs = make([]int64, n)
+	}
+
 	stacks := make([]int, n)
 	for i := range stacks {
 		stacks[i] = cfg.StartingStack
 	}
 	rng := rand.New(rand.NewSource(rngSeed))
+	startedAt := time.Now()
+
+	gameRecord := store.GameRecord{
+		NumSeats:   n,
+		Seats:      make([]store.GameSeat, n),
+		StartedAt:  startedAt,
+		ConfigJSON: configJSON(cfg, hands),
+	}
 
 	handsPlayed := 0
 	for h := 1; h <= hands; h++ {
@@ -293,8 +317,14 @@ func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cf
 				Player: makePlayers[i](),
 			}
 		}
-		_, result := engine.PlayHand(seats, button, cfg, rng, h)
+		events, result := engine.PlayHand(seats, button, cfg, rng, h)
 		stacks = result.FinalStacks
+
+		// 翻译成 HandRecord(若需要落库)
+		if rec != nil {
+			hr := translateHand(h, button, events, result, playerIDs)
+			gameRecord.Hands = append(gameRecord.Hands, hr)
+		}
 		handsPlayed++
 	}
 
@@ -308,9 +338,69 @@ func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cf
 		}
 	}
 
-	return &ResultN{
+	out := &ResultN{
 		HandsPlayed: handsPlayed,
 		WinnerSeat:  winnerSeat,
 		FinalStacks: stacks,
-	}, nil
+	}
+
+	// 落库 + 更新 ELO
+	if rec != nil {
+		// 填充 gameRecord.Seats
+		isDraw := (winnerSeat == -1)
+		for i, finalChips := range stacks {
+			gameRecord.Seats[i] = store.GameSeat{
+				PlayerID:   playerIDs[i],
+				FinalChips: finalChips,
+				IsWinner:   !isDraw && i == winnerSeat,
+			}
+		}
+		gameRecord.HandsPlayed = handsPlayed
+		gameRecord.IsDraw = isDraw
+		gameRecord.FinishedAt = time.Now()
+
+		gameID, err := rec.RecordGame(gameRecord)
+		if err != nil {
+			return nil, fmt.Errorf("record game: %w", err)
+		}
+		out.GameID = gameID
+		out.PlayerIDs = playerIDs
+		out.EloChange = make([]float64, n)
+
+		// 计算多人 ELO
+		if !isDraw && winnerSeat >= 0 {
+			// 获取所有玩家当前 ELO
+			elos := make([]float64, n)
+			for i, pid := range playerIDs {
+				elo, _ := rec.GetElo(pid)
+				elos[i] = float64(elo)
+			}
+
+			// 用 elo.UpdateMulti:赢家 vs 所有输家
+			winnerRating := elos[winnerSeat]
+			var loserRatings []float64
+			for i, elo := range elos {
+				if i != winnerSeat {
+					loserRatings = append(loserRatings, elo)
+				}
+			}
+			newWinner, newLosers := elo.UpdateMulti(winnerRating, loserRatings, 0)
+
+			// 写回数据库
+			loserIdx := 0
+			for i, pid := range playerIDs {
+				if i == winnerSeat {
+					_ = rec.SetElo(pid, int(newWinner))
+					out.EloChange[i] = newWinner - elos[i]
+				} else {
+					_ = rec.SetElo(pid, int(newLosers[loserIdx]))
+					out.EloChange[i] = newLosers[loserIdx] - elos[i]
+					loserIdx++
+				}
+			}
+		}
+		// 平局时不更新 ELO(out.EloChange 保持全 0)
+	}
+
+	return out, nil
 }

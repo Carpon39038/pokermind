@@ -72,6 +72,9 @@ func TestPlayUpdatesElo(t *testing.T) {
 	}
 
 	// ELO 应该变了:赢家涨,输家跌,平局两者变化互为相反
+	if len(res.EloChange) != 2 {
+		t.Fatalf("EloChange length = %d, want 2", len(res.EloChange))
+	}
 	delta1, delta2 := res.EloChange[0], res.EloChange[1]
 	if res.Winner == -1 {
 		// 平局:两人 delta 应都接近 0(同分时 ELO 公式给 0 增益)
@@ -193,7 +196,7 @@ func makeSpecs(n int) []PlayerSpec {
 func TestPlayNThreePlayers(t *testing.T) {
 	specs := makeSpecs(3)
 	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
-	res, err := PlayN(specs, makeRuleBots(3), 5, cfg, 42)
+	res, err := PlayN(specs, makeRuleBots(3), 5, cfg, 42, nil)
 	if err != nil {
 		t.Fatalf("PlayN: %v", err)
 	}
@@ -223,7 +226,7 @@ func TestPlayNThreePlayers(t *testing.T) {
 func TestPlayNSixPlayers(t *testing.T) {
 	specs := makeSpecs(6)
 	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
-	res, err := PlayN(specs, makeRuleBots(6), 3, cfg, 7)
+	res, err := PlayN(specs, makeRuleBots(6), 3, cfg, 7, nil)
 	if err != nil {
 		t.Fatalf("PlayN: %v", err)
 	}
@@ -242,11 +245,11 @@ func TestPlayNSixPlayers(t *testing.T) {
 func TestPlayNValidatesSize(t *testing.T) {
 	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	// 1 人太少
-	if _, err := PlayN(makeSpecs(1), makeRuleBots(1), 1, cfg, 1); err == nil {
+	if _, err := PlayN(makeSpecs(1), makeRuleBots(1), 1, cfg, 1, nil); err == nil {
 		t.Fatalf("expected error for 1 player")
 	}
 	// 7 人太多
-	if _, err := PlayN(makeSpecs(7), makeRuleBots(7), 1, cfg, 1); err == nil {
+	if _, err := PlayN(makeSpecs(7), makeRuleBots(7), 1, cfg, 1, nil); err == nil {
 		t.Fatalf("expected error for 7 players")
 	}
 }
@@ -254,7 +257,7 @@ func TestPlayNValidatesSize(t *testing.T) {
 func TestPlayNValidatesMakePlayersLength(t *testing.T) {
 	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
 	// specs=3 但 makePlayers=2
-	if _, err := PlayN(makeSpecs(3), makeRuleBots(2), 1, cfg, 1); err == nil {
+	if _, err := PlayN(makeSpecs(3), makeRuleBots(2), 1, cfg, 1, nil); err == nil {
 		t.Fatalf("expected error for mismatched makePlayers length")
 	}
 }
@@ -275,7 +278,7 @@ func TestPlayNBankruptcyEarlyExit(t *testing.T) {
 		}
 		return out
 	}
-	res, err := PlayN(specs, alwaysCallN(3), 100, cfg, 99)
+	res, err := PlayN(specs, alwaysCallN(3), 100, cfg, 99, nil)
 	if err != nil {
 		t.Fatalf("PlayN: %v", err)
 	}

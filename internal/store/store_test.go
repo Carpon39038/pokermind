@@ -69,19 +69,25 @@ func TestRecordGameAndLeaderboard(t *testing.T) {
 	p2, _ := s.RegisterPlayer("glm", "glm-4.6", "glm-4.6")
 
 	g := GameRecord{
-		P1ID:         p1,
-		P2ID:         p2,
-		HandsPlayed:  2,
-		WinnerPID:    p1, // p1 赢
-		P1FinalChips: 1100,
-		P2FinalChips: 900,
-		StartedAt:    time.Now(),
-		FinishedAt:   time.Now(),
-		ConfigJSON:   `{"sb":5,"bb":10}`,
+		NumSeats:   2,
+		Seats: []GameSeat{
+			{PlayerID: p1, FinalChips: 1100, IsWinner: true},
+			{PlayerID: p2, FinalChips: 900, IsWinner: false},
+		},
+		HandsPlayed: 2,
+		IsDraw:      false,
+		StartedAt:   time.Now(),
+		FinishedAt:  time.Now(),
+		ConfigJSON:  `{"sb":5,"bb":10}`,
 		Hands: []HandRecord{
 			{
-				HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 30,
-				P1Hole: "Ac Kc", P2Hole: "Qc Jc", Community: "",
+				HandIndex:   1,
+				ButtonSeat:  0,
+				WinnerPID:   p1,
+				Folded:      true,
+				Pot:         30,
+				PlayerHoles: []string{"Ac Kc", "Qc Jc"},
+				Community:   "",
 				Actions: []ActionRecord{
 					{Seq: 0, Street: "preflop", Seat: 0, PlayerID: p1, ActionType: "raise", Amount: 30, PotBefore: 15, ToCall: 5,
 						HasSelfReport: true, Reasoning: "AKs premium", HandStrength: 0.9, EstEquity: 0.65, IsBluffing: false},
@@ -90,9 +96,15 @@ func TestRecordGameAndLeaderboard(t *testing.T) {
 				},
 			},
 			{
-				HandIndex: 2, ButtonSeat: 1, IsDraw: false, WinnerPID: p1, Folded: true, Pot: 20,
-				P1Hole: "", P2Hole: "", Community: "",
-				Actions: nil,
+				HandIndex:   2,
+				ButtonSeat:  1,
+				WinnerPID:   p1,
+				IsDraw:      false,
+				Folded:      true,
+				Pot:         20,
+				PlayerHoles: []string{"", ""},
+				Community:   "",
+				Actions:     nil,
 			},
 		},
 	}
@@ -128,8 +140,8 @@ func TestRecordGameAndLeaderboard(t *testing.T) {
 	if p1Row.Games != 1 || p1Row.Wins != 1 {
 		t.Fatalf("p1 games/wins = %d/%d, want 1/1", p1Row.Games, p1Row.Wins)
 	}
-	if p1Row.NetChips != 200 { // 1100 - 900 = 200
-		t.Fatalf("p1 net chips = %d, want 200", p1Row.NetChips)
+	if p1Row.NetChips != 100 { // 1100 - 1000 = 100 (计算改为:final - starting_stack)
+		t.Fatalf("p1 net chips = %d, want 100", p1Row.NetChips)
 	}
 	if p2Row.Wins != 0 {
 		t.Fatalf("p2 should have 0 wins, got %d", p2Row.Wins)
@@ -143,21 +155,30 @@ func TestRecordGameAtomicRollbackOnError(t *testing.T) {
 	// p2 不注册,用一个不存在的 id
 	badPID := int64(9999)
 	g := GameRecord{
-		P1ID:         p1,
-		P2ID:         badPID,
-		HandsPlayed:  1,
-		WinnerPID:    p1,
-		P1FinalChips: 1000,
-		P2FinalChips: 1000,
-		StartedAt:    time.Now(),
-		FinishedAt:   time.Now(),
-		ConfigJSON:   "{}",
+		NumSeats:   2,
+		Seats:      []GameSeat{{PlayerID: p1, FinalChips: 1000, IsWinner: true}, {PlayerID: badPID, FinalChips: 1000, IsWinner: false}},
+		HandsPlayed: 1,
+		IsDraw:      false,
+		StartedAt:   time.Now(),
+		FinishedAt:  time.Now(),
+		ConfigJSON:  "{}",
 		Hands: []HandRecord{{
-			HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 10,
-			P1Hole: "", P2Hole: "", Community: "",
+			HandIndex:   1,
+			ButtonSeat:  0,
+			WinnerPID:   p1,
+			Folded:      true,
+			Pot:         10,
+			PlayerHoles: []string{"", ""},
+			Community:   "",
 			Actions: []ActionRecord{{
-				Seq: 0, Street: "preflop", Seat: 0, PlayerID: badPID,
-				ActionType: "fold", Amount: 0, PotBefore: 10, ToCall: 5,
+				Seq:        0,
+				Street:     "preflop",
+				Seat:       0,
+				PlayerID:   badPID,
+				ActionType: "fold",
+				Amount:     0,
+				PotBefore:  10,
+				ToCall:     5,
 			}},
 		}},
 	}
@@ -192,14 +213,21 @@ func TestListGamesReturnsRecentFirst(t *testing.T) {
 	// 写 3 局
 	for i := 0; i < 3; i++ {
 		_, err := s.RecordGame(GameRecord{
-			P1ID: p1, P2ID: p2,
-			HandsPlayed: 1, WinnerPID: p1,
-			P1FinalChips: 1100, P2FinalChips: 900,
-			StartedAt: time.Now(), FinishedAt: time.Now(),
-			ConfigJSON: "{}",
+			NumSeats:   2,
+			Seats:      []GameSeat{{PlayerID: p1, FinalChips: 1100, IsWinner: true}, {PlayerID: p2, FinalChips: 900, IsWinner: false}},
+			HandsPlayed: 1,
+			IsDraw:      false,
+			StartedAt:   time.Now(),
+			FinishedAt:  time.Now(),
+			ConfigJSON:  "{}",
 			Hands: []HandRecord{{
-				HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 10,
-				P1Hole: "", P2Hole: "", Community: "",
+				HandIndex:   1,
+				ButtonSeat:  0,
+				WinnerPID:   p1,
+				Folded:      true,
+				Pot:         10,
+				PlayerHoles: []string{"", ""},
+				Community:   "",
 			}},
 		})
 		if err != nil {
@@ -217,12 +245,21 @@ func TestListGamesReturnsRecentFirst(t *testing.T) {
 	if games[0].ID <= games[2].ID {
 		t.Fatalf("expected DESC order, got ids %d %d %d", games[0].ID, games[1].ID, games[2].ID)
 	}
-	// label 正确填充
-	if games[0].P1Label != "ax" || games[0].P2Label != "ay" {
-		t.Fatalf("labels = %q/%q", games[0].P1Label, games[0].P2Label)
+	// Players 正确填充
+	if len(games[0].Players) != 2 || games[0].Players[0].Label != "ax" || games[0].Players[1].Label != "ay" {
+		t.Fatalf("players = %+v", games[0].Players)
 	}
-	if games[0].WinnerLabel != "ax" {
-		t.Fatalf("winner label = %q, want ax", games[0].WinnerLabel)
+	// 检查 NumSeats
+	if games[0].NumSeats != 2 {
+		t.Fatalf("num_seats = %d, want 2", games[0].NumSeats)
+	}
+	// 检查 IsDraw
+	if games[0].IsDraw {
+		t.Fatalf("is_draw should be false")
+	}
+	// 检查 winner 信息(第一个玩家 IsWinner=true)
+	if !games[0].Players[0].IsWinner {
+		t.Fatalf("first player should be winner")
 	}
 }
 
@@ -232,11 +269,14 @@ func TestListGamesRespectsLimit(t *testing.T) {
 	p2, _ := s.RegisterPlayer("a", "y", "y")
 	for i := 0; i < 5; i++ {
 		_, _ = s.RecordGame(GameRecord{
-			P1ID: p1, P2ID: p2, HandsPlayed: 1, WinnerPID: p1,
-			P1FinalChips: 1000, P2FinalChips: 1000,
-			StartedAt: time.Now(), FinishedAt: time.Now(),
-			ConfigJSON: "{}",
-			Hands: []HandRecord{{HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 10}},
+			NumSeats:    2,
+			Seats:       []GameSeat{{PlayerID: p1, FinalChips: 1000, IsWinner: true}, {PlayerID: p2, FinalChips: 1000, IsWinner: false}},
+			HandsPlayed: 1,
+			IsDraw:      false,
+			StartedAt:   time.Now(),
+			FinishedAt:  time.Now(),
+			ConfigJSON:  "{}",
+			Hands: []HandRecord{{HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 10, PlayerHoles: []string{"", ""}}},
 		})
 	}
 	games, _ := s.ListGames(2)
@@ -261,15 +301,22 @@ func TestGetGameFullTreeWithSelfReport(t *testing.T) {
 	p1, _ := s.RegisterPlayer("deepseek", "flash", "ds-flash")
 	p2, _ := s.RegisterPlayer("glm", "glm4", "glm4")
 	gameID, err := s.RecordGame(GameRecord{
-		P1ID: p1, P2ID: p2,
-		HandsPlayed: 2, WinnerPID: p1,
-		P1FinalChips: 1100, P2FinalChips: 900,
-		StartedAt: time.Now(), FinishedAt: time.Now(),
-		ConfigJSON: `{"sb":5}`,
+		NumSeats:   2,
+		Seats:      []GameSeat{{PlayerID: p1, FinalChips: 1100, IsWinner: true}, {PlayerID: p2, FinalChips: 900, IsWinner: false}},
+		HandsPlayed: 2,
+		IsDraw:      false,
+		StartedAt:   time.Now(),
+		FinishedAt:  time.Now(),
+		ConfigJSON:  `{"sb":5}`,
 		Hands: []HandRecord{
 			{
-				HandIndex: 1, ButtonSeat: 0, WinnerPID: p1, Folded: true, Pot: 30,
-				P1Hole: "Ac Kc", P2Hole: "Qc Jc", Community: "",
+				HandIndex:   1,
+				ButtonSeat:  0,
+				WinnerPID:   p1,
+				Folded:      true,
+				Pot:         30,
+				PlayerHoles: []string{"Ac Kc", "Qc Jc"},
+				Community:   "",
 				Actions: []ActionRecord{
 					{Seq: 0, Street: "preflop", Seat: 0, PlayerID: p1, ActionType: "raise", Amount: 30, PotBefore: 15, ToCall: 5,
 						HasSelfReport: true, Reasoning: "premium AKs", HandStrength: 0.9, EstEquity: 0.65, IsBluffing: false},
@@ -278,8 +325,14 @@ func TestGetGameFullTreeWithSelfReport(t *testing.T) {
 				},
 			},
 			{
-				HandIndex: 2, ButtonSeat: 1, IsDraw: false, WinnerPID: p2, Folded: false, Pot: 50,
-				P1Hole: "Th Td", P2Hole: "2h 7c", Community: "5s 9d Kc",
+				HandIndex:   2,
+				ButtonSeat:  1,
+				IsDraw:      false,
+				WinnerPID:   p2,
+				Folded:      false,
+				Pot:         50,
+				PlayerHoles: []string{"Th Td", "2h 7c"},
+				Community:   "5s 9d Kc",
 				Actions: []ActionRecord{
 					{Seq: 0, Street: "flop", Seat: 1, PlayerID: p2, ActionType: "call", Amount: 0, PotBefore: 50, ToCall: 0,
 						HasSelfReport: true, Reasoning: "free card", HandStrength: 0.1, EstEquity: 0.15, IsBluffing: true},
@@ -298,11 +351,21 @@ func TestGetGameFullTreeWithSelfReport(t *testing.T) {
 	if g == nil {
 		t.Fatalf("GetGame returned nil for existing game %d", gameID)
 	}
-	if g.P1Label != "ds-flash" || g.P2Label != "glm4" {
-		t.Fatalf("labels = %q/%q", g.P1Label, g.P2Label)
+	// 检查 Players
+	if len(g.Players) != 2 || g.Players[0].Label != "ds-flash" || g.Players[1].Label != "glm4" {
+		t.Fatalf("players = %+v", g.Players)
 	}
-	if g.WinnerLabel != "ds-flash" {
-		t.Fatalf("winner = %q, want ds-flash", g.WinnerLabel)
+	// 检查 NumSeats
+	if g.NumSeats != 2 {
+		t.Fatalf("num_seats = %d, want 2", g.NumSeats)
+	}
+	// 检查 IsDraw
+	if g.IsDraw {
+		t.Fatalf("is_draw should be false")
+	}
+	// 检查 IsWinner
+	if !g.Players[0].IsWinner {
+		t.Fatalf("first player should be winner")
 	}
 	if len(g.Hands) != 2 {
 		t.Fatalf("hands len = %d, want 2", len(g.Hands))
@@ -312,8 +375,12 @@ func TestGetGameFullTreeWithSelfReport(t *testing.T) {
 	if h1.HandIndex != 1 || len(h1.Actions) != 2 {
 		t.Fatalf("hand1 index/actions = %d/%d", h1.HandIndex, len(h1.Actions))
 	}
-	if h1.P1Hole != "Ac Kc" || h1.Community != "" {
-		t.Fatalf("hand1 hole/community = %q/%q", h1.P1Hole, h1.Community)
+	// 检查 PlayerHoles
+	if len(h1.PlayerHoles) != 2 || h1.PlayerHoles[0] != "Ac Kc" || h1.PlayerHoles[1] != "Qc Jc" {
+		t.Fatalf("hand1 player_holes = %v", h1.PlayerHoles)
+	}
+	if h1.Community != "" {
+		t.Fatalf("hand1 community = %q, want empty", h1.Community)
 	}
 	// 第一手第一个动作带 self report
 	a := h1.Actions[0]
@@ -331,5 +398,9 @@ func TestGetGameFullTreeWithSelfReport(t *testing.T) {
 	}
 	if h2.Community != "5s 9d Kc" {
 		t.Fatalf("hand2 community = %q", h2.Community)
+	}
+	// 检查第二手 PlayerHoles
+	if len(h2.PlayerHoles) != 2 || h2.PlayerHoles[0] != "Th Td" || h2.PlayerHoles[1] != "2h 7c" {
+		t.Fatalf("hand2 player_holes = %v", h2.PlayerHoles)
 	}
 }

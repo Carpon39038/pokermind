@@ -236,7 +236,14 @@ func matchCmd(args []string) {
 	}
 	fmt.Printf("\n=== Match over: winner=%s, %d hands played, elapsed=%v ===\n", winnerLabel, res.HandsPlayed, elapsed)
 	fmt.Printf("    final chips: %s=%d  %s=%d\n", spec1.Label, res.FinalStacks[0], spec2.Label, res.FinalStacks[1])
-	fmt.Printf("    ELO change:  %s=%+d  %s=%+d\n", spec1.Label, int(res.EloChange[0]), spec2.Label, int(res.EloChange[1]))
+	// Result.EloChange 现在是 []float64,长度为 2(N=2 时)
+	eloChange1 := float64(0)
+	eloChange2 := float64(0)
+	if len(res.EloChange) >= 2 {
+		eloChange1 = res.EloChange[0]
+		eloChange2 = res.EloChange[1]
+	}
+	fmt.Printf("    ELO change:  %s=%+d  %s=%+d\n", spec1.Label, int(eloChange1), spec2.Label, int(eloChange2))
 
 	printLeaderboard(rec)
 	_ = verbose // verbose 模式留待后续在 match 包加 hook
