@@ -86,7 +86,7 @@ cp .env.example .env
 
 常用 flag:
 
-- `run`:`--provider`、`--model`、`--hands`(默认 1)、`--seed`(默认 1)
+- `run`:`--provider`(provider 名,见下)、`--model`、`--hands`(默认 1)、`--seed`(默认 1)、`--db`(默认 `pokermind.db`)
 - `match`:`--players p1,p2,...`(2-6)、`--hands`(默认 100)、`--seed`、`--db`、`--verbose`
 - `serve`:`--addr`(默认 `:8080`)、`--db`、`--web`(默认 `web`)
 
@@ -101,6 +101,21 @@ cp .env.example .env
 | `POKERMIND_GLM_API_KEY` | — | 智谱 GLM API Key |
 | `POKERMIND_GLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | GLM base url |
 | `POKERMIND_HTTP_TIMEOUT_SECONDS` | `60` | 单次 LLM 调用超时 |
+
+### Provider 配置(Web)
+
+启动 `pokermind serve` 后,在浏览器 `http://localhost:8080/#/providers` 增改 provider:
+
+- **name**:唯一标识,CLI `--provider <name>` 与 web 选座位时引用此名
+- **kind**:`openai`(OpenAI 兼容,DeepSeek/GLM/Qwen 等绝大多数)或 `anthropic`(Claude)
+- **base_url**:不含末尾 `/`;如 `https://api.deepseek.com`、`https://api.anthropic.com`
+- **api_key**:存 SQLite 明文,API 响应里脱敏成 `***1234`
+
+CLI 启动时自动把 `.env` 里的 `POKERMIND_DEEPSEEK_API_KEY` / `POKERMIND_GLM_API_KEY` 迁移成同名 provider(已在库里则不覆盖)。
+
+### 现场观战(Web)
+
+`http://localhost:8080/#/live` 选 N 个 seat 的 provider/model → 点「开始对局」→ 跳到 `#/live/{match_id}` 通过 SSE 逐动作观战(底牌/筹码/底池/动作日志实时刷新)。对局结束自动落库,可在 `#/` 重看完整回放。
 
 ---
 
