@@ -355,10 +355,183 @@ async function refreshProvidersTable() {
   });
 }
 
-// 占位:live 配置 + 观战页在 Task 8 实现。
+// ============ live 配置页 ============
 async function renderLiveConfig() {
-  app.innerHTML = '<div class="empty">现场观战页即将上线(Task 8)。</div>';
+  let provs = [];
+  try {
+    const r = await fetch('/api/providers');
+    provs = await r.json();
+  } catch (e) { /* empty */ }
+  const optStr = (provs || []).map(p => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)} (${escapeHtml(p.kind)})</option>`).join('');
+
+  app.innerHTML = `
+    <section class="page">
+      <h2 style="margin-top:0">现场对战</h2>
+      <div id="live-status"></div>
+      <form id="live-form">
+        <div class="live-form-row">
+          <label>座位数 <select name="n" id="seat-n">
+            <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+          </select></label>
+          <label>手数 <input name="hands" value="20" type="number" min="1"></label>
+          <label>seed <input name="seed" value="" type="number" placeholder="随机"></label>
+          <label>SB <input name="sb" value="5" type="number"></label>
+          <label>BB <input name="bb" value="10" type="number"></label>
+          <label>起手筹码 <input name="starting_stack" value="1000" type="number"></label>
+        </div>
+        <table id="seat-table"><thead><tr><th>seat</th><th>provider</th><th>model</th></tr></thead><tbody></tbody></table>
+        <button type="submit">开始对局</button>
+      </form>
+    </section>
+  `;
+
+  const seatN = document.getElementById('seat-n');
+  const tbody = document.querySelector('#seat-table tbody');
+  function rebuildSeats() {
+    const n = parseInt(seatN.value, 10);
+    tbody.innerHTML = Array.from({length: n}, (_, i) => `
+      <tr>
+        <td>${i}</td>
+        <td><select name="seat_${i}_provider">${optStr}</select></td>
+        <td><input name="seat_${i}_model" placeholder="model name" required></td>
+      </tr>
+    `).join('');
+  }
+  seatN.addEventListener('change', rebuildSeats);
+  rebuildSeats();
+
+  try {
+    const stReq = await fetch('/api/matches/current');
+    const st = await stReq.json();
+    if (st.running) {
+      document.getElementById('live-status').innerHTML = `
+        <p class="hint">⚠️ 当前有对局在跑:<a href="#/live/${escapeHtml(st.match_id)}">前往观战 →</a></p>
+      `;
+    }
+  } catch (e) { /* ignore */ }
+
+  document.getElementById('live-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const n = parseInt(fd.get('n'), 10);
+    const seats = [];
+    for (let i = 0; i < n; i++) {
+      seats.push({provider: fd.get(`seat_${i}_provider`), model: fd.get(`seat_${i}_model`)});
+    }
+    const body = {
+      seats, hands: parseInt(fd.get('hands'), 10),
+      sb: parseInt(fd.get('sb'), 10), bb: parseInt(fd.get('bb'), 10),
+      starting_stack: parseInt(fd.get('starting_stack'), 10),
+    };
+    if (fd.get('seed')) body.seed = parseInt(fd.get('seed'), 10);
+    const r = await fetch('/api/matches', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert(await r.text()); return; }
+    const res = await r.json();
+    location.hash = '#/live/' + res.match_id;
+  });
 }
+
+// ============ live 观战页 ============
 function renderLiveWatch(matchID) {
-  app.innerHTML = `<div class="empty">match ${escapeHtml(matchID)} 观战页即将上线(Task 8)。</div>`;
+  app.innerHTML = `
+    <section class="page">
+      <header class="live-header">
+        <h2 style="margin:0">现场观战 <small id="match-progress"></small></h2>
+        <button id="stop-btn">停止对局</button>
+      </header>
+      <div class="poker-table" id="table"></div>
+      <div class="community" id="community"></div>
+      <div class="pot" id="pot">底池: 0</div>
+      <ul class="action-log" id="log"></ul>
+    </section>
+  `;
+
+  let totalHands = 0;
+  const seats = {}; // seat -> {label, stack, bet, hole, folded, winner}
+
+  document.getElementById('stop-btn').onclick = async () => {
+    if (!confirm('停止当前对局?(不会落库)')) return;
+    await fetch('/api/matches/current/stop', {method: 'POST'});
+  };
+
+  const es = new EventSource('/api/matches/current/stream');
+  es.addEventListener("no_running", () => {
+    document.getElementById('log').innerHTML += `<li class="sys">没有正在运行的对局</li>`;
+    es.close();
+  });
+  es.addEventListener("match_started", e => {
+    const d = JSON.parse(e.data);
+    totalHands = d.hands;
+    renderTable(d.seats);
+  });
+  es.addEventListener("hand_started", e => {
+    const d = JSON.parse(e.data);
+    document.getElementById('match-progress').textContent = `第 ${d.hand}/${totalHands} 手`;
+    Object.values(seats).forEach(s => { s.bet = 0; s.folded = false; s.winner = false; });
+    for (const h of (d.holes || [])) {
+      if (seats[h.seat]) seats[h.seat].hole = h.cards;
+    }
+    refreshView();
+  });
+  es.addEventListener("action", e => {
+    const d = JSON.parse(e.data);
+    const s = seats[d.seat];
+    if (!s) return;
+    let line = `seat${d.seat} ${escapeHtml(d.provider)}:${escapeHtml(d.model)} ${d.action_type.toUpperCase()}`;
+    if (d.action_type === 'raise') line += `-to-${d.amount}`;
+    if (d.has_report) line += ` — "${escapeHtml(d.reasoning)}" (hs=${(d.hand_strength*1).toFixed(2)} eq=${(d.estimated_equity*1).toFixed(2)} bluff=${d.is_bluffing})`;
+    document.getElementById('log').innerHTML += `<li>${line}</li>`;
+
+    if (d.action_type === 'fold') { s.folded = true; }
+    if (d.action_type === 'raise') { s.bet = d.amount; }
+    refreshView();
+  });
+  es.addEventListener("hand_finished", e => {
+    const d = JSON.parse(e.data);
+    document.getElementById('pot').textContent = `底池: ${d.pot}`;
+    document.getElementById('community').innerHTML = (d.community || []).map(renderCard).join('');
+    for (const seat of d.winners) {
+      if (seats[seat]) seats[seat].winner = true;
+    }
+    document.getElementById('log').innerHTML += `<li class="sys">第 ${d.hand} 手结束:赢家 seat ${d.winners.join(',')},pot=${d.pot}</li>`;
+    refreshView();
+  });
+  es.addEventListener("match_finished", e => {
+    const d = JSON.parse(e.data);
+    es.close();
+    const summary = d.final_stacks.map((c, i) => `seat${i}=${c}`).join(', ');
+    document.getElementById('log').innerHTML += `<li class="sys">对局结束:赢家 seat ${d.winner_seat},game_id=${d.game_id}<br>${escapeHtml(summary)}</li>`;
+    document.getElementById('stop-btn').disabled = true;
+  });
+  es.addEventListener("error", e => {
+    if (e.data) {
+      document.getElementById('log').innerHTML += `<li class="sys">错误事件:${escapeHtml(e.data)}</li>`;
+    }
+  });
+
+  function renderTable(seatList) {
+    const tbl = document.getElementById('table');
+    tbl.innerHTML = seatList.map(s => {
+      seats[s.seat] = {label: `${s.provider}:${s.model}`, stack: 0, bet: 0, hole: [], folded: false, winner: false};
+      return `<div class="seat" id="seat-${s.seat}"></div>`;
+    }).join('');
+    refreshView();
+  }
+  function refreshView() {
+    for (const [id, s] of Object.entries(seats)) {
+      const el = document.getElementById('seat-' + id);
+      if (!el) continue;
+      const holeHtml = (s.hole || []).map(renderCard).join('') || '<span class="hint">—</span>';
+      el.innerHTML = `
+        <div class="seat-name">${escapeHtml(s.label)}</div>
+        <div class="seat-stack">本手投入: ${s.bet}</div>
+        <div class="cards-row">${holeHtml}</div>
+        ${s.folded ? '<div class="flag">FOLD</div>' : ''}
+        ${s.winner ? '<div class="flag win">WIN</div>' : ''}
+      `;
+    }
+  }
 }

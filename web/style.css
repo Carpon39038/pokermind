@@ -310,3 +310,22 @@ a:hover { text-decoration: underline; }
 #prov-form button { padding: 6px 14px; cursor: pointer; }
 .hint { color: var(--text-dim); font-size: 12px; }
 .del { background: #c33; color: #fff; border: 0; padding: 3px 10px; cursor: pointer; border-radius: 3px; }
+
+/* === live 观战页 === */
+.live-form-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 10px; }
+.live-form-row label { display: flex; flex-direction: column; font-size: 12px; color: var(--text-dim); gap: 2px; }
+.live-form-row input, .live-form-row select { background: var(--surface); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: 3px; }
+.live-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+#seat-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+#seat-table th, #seat-table td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+#seat-table input, #seat-table select { background: var(--surface); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: 3px; }
+.poker-table { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0; }
+.poker-table .seat { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--surface); }
+.poker-table .seat .flag { color: #c33; font-weight: bold; margin-top: 4px; }
+.poker-table .seat .flag.win { color: #0c3; }
+.community { min-height: 40px; padding: 8px; border: 1px dashed var(--border); display: flex; gap: 4px; }
+.community:empty::before { content: '公共牌区'; color: var(--text-dim); font-size: 12px; }
+.pot { font-weight: bold; margin: 6px 0; }
+.action-log { list-style: none; padding: 0; max-height: 320px; overflow-y: auto; border-top: 1px solid var(--border); }
+.action-log li { padding: 4px 6px; border-bottom: 1px solid var(--border); font-family: monospace; font-size: 13px; }
+.action-log li.sys { background: rgba(255,200,0,0.1); }
