@@ -2,6 +2,7 @@
 package match
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -403,4 +404,363 @@ func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cf
 	}
 
 	return out, nil
+}
+
+// LiveEvent 是 RunLive 在对局过程中向外推送的事件。
+type LiveEvent struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// LiveEvent 类型常量。
+const (
+	EvMatchStarted  = "match_started"
+	EvHandStarted   = "hand_started"
+	EvAction        = "action"
+	EvHandFinished  = "hand_finished"
+	EvMatchFinished = "match_finished"
+	EvError         = "error"
+)
+
+type liveSeatInfo struct {
+	Seat     int    `json:"seat"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Label    string `json:"label"`
+}
+
+type matchStartedPayload struct {
+	Seats         []liveSeatInfo `json:"seats"`
+	Hands         int            `json:"hands"`
+	SmallBlind    int            `json:"sb"`
+	BigBlind      int            `json:"bb"`
+	StartingStack int            `json:"starting_stack"`
+}
+
+type liveHole struct {
+	Seat  int      `json:"seat"`
+	Cards []string `json:"cards"`
+}
+
+type handStartedPayload struct {
+	Hand   int        `json:"hand"`
+	Button int        `json:"button"`
+	Holes  []liveHole `json:"holes"`
+}
+
+type actionPayload struct {
+	Hand       int     `json:"hand"`
+	Seq        int     `json:"seq"`
+	Street     string  `json:"street"`
+	Seat       int     `json:"seat"`
+	Provider   string  `json:"provider"`
+	Model      string  `json:"model"`
+	ActionType string  `json:"action_type"`
+	Amount     int     `json:"amount"`
+	HasReport  bool    `json:"has_report,omitempty"`
+	Reasoning  string  `json:"reasoning,omitempty"`
+	HandStr    float64 `json:"hand_strength,omitempty"`
+	EstEquity  float64 `json:"estimated_equity,omitempty"`
+	IsBluffing bool    `json:"is_bluffing,omitempty"`
+}
+
+type handFinishedPayload struct {
+	Hand      int      `json:"hand"`
+	Winners   []int    `json:"winners"`
+	Community []string `json:"community"`
+	Pot       int      `json:"pot"`
+	Folded    bool     `json:"folded"`
+}
+
+type matchFinishedPayload struct {
+	WinnerSeat  int       `json:"winner_seat"`
+	FinalStacks []int     `json:"final_stacks"`
+	EloChange   []float64 `json:"elo_change,omitempty"`
+	GameID      int64     `json:"game_id,omitempty"`
+}
+
+// RunLive 与 PlayN 平级,差别:
+//  1. 每个事件 hook 把 LiveEvent 发到 out(非阻塞,满则丢)。
+//  2. ctx 用于取消(用户点「停止」),取消时立刻 return error,不落库。
+//  3. 落库 + ELO 逻辑同 PlayN。
+func RunLive(
+	ctx context.Context,
+	specs []PlayerSpec,
+	makePlayers []func() engine.Player,
+	hands int,
+	cfg engine.Config,
+	rngSeed int64,
+	rec *store.Store,
+	out chan<- LiveEvent,
+) (*ResultN, error) {
+	n := len(specs)
+	if n < 2 || n > 6 {
+		return nil, fmt.Errorf("RunLive: need 2-6 specs, got %d", n)
+	}
+	if len(makePlayers) != n {
+		return nil, fmt.Errorf("RunLive: makePlayers length %d != specs length %d", len(makePlayers), n)
+	}
+	if hands <= 0 {
+		return nil, fmt.Errorf("RunLive: hands must be > 0")
+	}
+	if cfg.BigBlind <= 0 || cfg.SmallBlind <= 0 {
+		return nil, fmt.Errorf("RunLive: invalid blinds")
+	}
+
+	// 注册玩家
+	var playerIDs []int64
+	if rec != nil {
+		playerIDs = make([]int64, n)
+		for i, spec := range specs {
+			id, err := rec.RegisterPlayer(spec.Provider, spec.Model, spec.Label)
+			if err != nil {
+				return nil, fmt.Errorf("register player %d: %w", i, err)
+			}
+			playerIDs[i] = id
+		}
+	} else {
+		playerIDs = make([]int64, n)
+	}
+
+	// match_started
+	msPayload := matchStartedPayload{
+		Hands:         hands,
+		SmallBlind:    cfg.SmallBlind,
+		BigBlind:      cfg.BigBlind,
+		StartingStack: cfg.StartingStack,
+	}
+	for i, spec := range specs {
+		msPayload.Seats = append(msPayload.Seats, liveSeatInfo{
+			Seat: i, Provider: spec.Provider, Model: spec.Model, Label: spec.Label,
+		})
+	}
+	emitLive(out, LiveEvent{Type: EvMatchStarted, Payload: mustPayload(msPayload)})
+
+	stacks := make([]int, n)
+	for i := range stacks {
+		stacks[i] = cfg.StartingStack
+	}
+	rng := rand.New(rand.NewSource(rngSeed))
+	startedAt := time.Now()
+
+	gameRecord := store.GameRecord{
+		NumSeats:   n,
+		Seats:      make([]store.GameSeat, n),
+		StartedAt:  startedAt,
+		ConfigJSON: configJSON(cfg, hands),
+	}
+
+	handsPlayed := 0
+	for h := 1; h <= hands; h++ {
+		if err := ctx.Err(); err != nil {
+			emitLive(out, LiveEvent{Type: EvError, Payload: mustPayload(map[string]string{"error": err.Error()})})
+			return nil, err
+		}
+
+		bust := false
+		for _, s := range stacks {
+			if s < cfg.BigBlind {
+				bust = true
+				break
+			}
+		}
+		if bust {
+			break
+		}
+
+		button := (h - 1) % n
+		seats := make([]engine.PlayerSeat, n)
+		for i := 0; i < n; i++ {
+			seats[i] = engine.PlayerSeat{
+				ID:     i,
+				Stack:  stacks[i],
+				Player: makePlayers[i](),
+			}
+		}
+		events, result := engine.PlayHand(seats, button, cfg, rng, h)
+		stacks = result.FinalStacks
+
+		emitHandEvents(out, events, h, button, specs, result)
+
+		if rec != nil {
+			hr := translateHand(h, button, events, result, playerIDs)
+			gameRecord.Hands = append(gameRecord.Hands, hr)
+		}
+		handsPlayed++
+	}
+
+	if err := ctx.Err(); err != nil {
+		emitLive(out, LiveEvent{Type: EvError, Payload: mustPayload(map[string]string{"error": err.Error()})})
+		return nil, err
+	}
+
+	winnerSeat := -1
+	best := -1
+	for i, s := range stacks {
+		if s > best {
+			best = s
+			winnerSeat = i
+		}
+	}
+
+	out2 := &ResultN{
+		HandsPlayed: handsPlayed,
+		WinnerSeat:  winnerSeat,
+		FinalStacks: stacks,
+	}
+
+	if rec != nil {
+		isDraw := (winnerSeat == -1)
+		for i, finalChips := range stacks {
+			gameRecord.Seats[i] = store.GameSeat{
+				PlayerID:   playerIDs[i],
+				FinalChips: finalChips,
+				IsWinner:   !isDraw && i == winnerSeat,
+			}
+		}
+		gameRecord.HandsPlayed = handsPlayed
+		gameRecord.IsDraw = isDraw
+		gameRecord.FinishedAt = time.Now()
+
+		gameID, err := rec.RecordGame(gameRecord)
+		if err != nil {
+			return nil, fmt.Errorf("record game: %w", err)
+		}
+		out2.GameID = gameID
+		out2.PlayerIDs = playerIDs
+		out2.EloChange = make([]float64, n)
+
+		if !isDraw && winnerSeat >= 0 {
+			elos := make([]float64, n)
+			for i, pid := range playerIDs {
+				e, _ := rec.GetElo(pid)
+				elos[i] = float64(e)
+			}
+			winnerRating := elos[winnerSeat]
+			var loserRatings []float64
+			for i, e := range elos {
+				if i != winnerSeat {
+					loserRatings = append(loserRatings, e)
+				}
+			}
+			newWinner, newLosers := elo.UpdateMulti(winnerRating, loserRatings, 0)
+			loserIdx := 0
+			for i, pid := range playerIDs {
+				if i == winnerSeat {
+					_ = rec.SetElo(pid, int(newWinner))
+					out2.EloChange[i] = newWinner - elos[i]
+				} else {
+					_ = rec.SetElo(pid, int(newLosers[loserIdx]))
+					out2.EloChange[i] = newLosers[loserIdx] - elos[i]
+					loserIdx++
+				}
+			}
+		}
+	}
+
+	mfPayload := matchFinishedPayload{
+		WinnerSeat:  winnerSeat,
+		FinalStacks: stacks,
+		EloChange:   out2.EloChange,
+		GameID:      out2.GameID,
+	}
+	emitLive(out, LiveEvent{Type: EvMatchFinished, Payload: mustPayload(mfPayload)})
+
+	return out2, nil
+}
+
+// emitHandEvents 从 engine events 抽出 hand_started / action / hand_finished 推送。
+func emitHandEvents(out chan<- LiveEvent, events []engine.Event, hand int, button int, specs []PlayerSpec, result engine.HandResult) {
+	hs := handStartedPayload{Hand: hand, Button: button}
+	handStartedSent := false
+
+	sendHandStarted := func() {
+		if handStartedSent {
+			return
+		}
+		handStartedSent = true
+		emitLive(out, LiveEvent{Type: EvHandStarted, Payload: mustPayload(hs)})
+	}
+
+	// 先收集本手所有公共牌,便于 hand_finished 使用
+	var communityCards []string
+	for _, ev := range events {
+		if ev.Type == engine.StreetAdvanced {
+			for _, c := range ev.Cards {
+				communityCards = append(communityCards, c.String())
+			}
+		}
+	}
+
+	seq := 0
+	for _, ev := range events {
+		switch ev.Type {
+		case engine.DealtHole:
+			if ev.Seat >= 0 && ev.Seat < len(specs) {
+				cards := make([]string, 0, len(ev.Cards))
+				for _, c := range ev.Cards {
+					cards = append(cards, c.String())
+				}
+				hs.Holes = append(hs.Holes, liveHole{Seat: ev.Seat, Cards: cards})
+			}
+			sendHandStarted()
+		case engine.ActionTaken:
+			sendHandStarted()
+			if ev.Action == nil {
+				continue
+			}
+			ap := actionPayload{
+				Hand:       hand,
+				Seq:        seq,
+				Street:     ev.Street.String(),
+				Seat:       ev.Seat,
+				ActionType: ev.Action.Type.String(),
+				Amount:     ev.Action.Amount,
+			}
+			if ev.Seat >= 0 && ev.Seat < len(specs) {
+				ap.Provider = specs[ev.Seat].Provider
+				ap.Model = specs[ev.Seat].Model
+			}
+			if ev.Action.SelfReport != nil {
+				ap.HasReport = true
+				ap.Reasoning = ev.Action.SelfReport.Reasoning
+				ap.HandStr = ev.Action.SelfReport.HandStrength
+				ap.EstEquity = ev.Action.SelfReport.EstimatedEquity
+				ap.IsBluffing = ev.Action.SelfReport.IsBluffing
+			}
+			seq++
+			emitLive(out, LiveEvent{Type: EvAction, Payload: mustPayload(ap)})
+		case engine.HandFinished:
+			sendHandStarted()
+			winners := append([]int(nil), ev.Winners...)
+			hf := handFinishedPayload{
+				Hand:      hand,
+				Winners:   winners,
+				Community: communityCards,
+				Pot:       result.PotWon,
+				Folded:    ev.Folded,
+			}
+			emitLive(out, LiveEvent{Type: EvHandFinished, Payload: mustPayload(hf)})
+		}
+	}
+}
+
+// emitLive 非阻塞地把 ev 发到 out;满则丢。
+func emitLive(out chan<- LiveEvent, ev LiveEvent) {
+	if out == nil {
+		return
+	}
+	select {
+	case out <- ev:
+	default:
+	}
+}
+
+// mustPayload 把 v marshal 成 RawMessage,失败时用 error payload。
+func mustPayload(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		b, _ = json.Marshal(map[string]string{"_marshal_error": err.Error()})
+	}
+	return b
 }
