@@ -234,3 +234,83 @@ func configJSON(cfg engine.Config, hands int) string {
 	})
 	return string(b)
 }
+
+// ResultN 是 N 人内存对局(PlayN)的产出。不落库,所以无 GameID/ELO 字段。
+type ResultN struct {
+	HandsPlayed int
+	WinnerSeat  int   // 最终筹码最高的 seat(平局给顺位最先);-1 表示全部破产
+	FinalStacks []int // 每 seat 结算后筹码
+}
+
+// PlayN 跑一局 N 人(2-6)内存对局,不落库。
+//
+//   specs       N 个 PlayerSpec(仅用于未来扩展/日志,本函数不消费)
+//   makePlayers N 个 Player 工厂,每次 PlayHand 调用前重新构造(避免跨手状态)
+//   hands       计划手数;任一 seat 筹码 < BB 时提前结束
+//
+// 返回每 seat 最终筹码。ELO 更新需 store,在 Task 4 接入 PlayN+rec 后加。
+func PlayN(specs []PlayerSpec, makePlayers []func() engine.Player, hands int, cfg engine.Config, rngSeed int64) (*ResultN, error) {
+	n := len(specs)
+	if n < 2 || n > 6 {
+		return nil, fmt.Errorf("PlayN: need 2-6 specs, got %d", n)
+	}
+	if len(makePlayers) != n {
+		return nil, fmt.Errorf("PlayN: makePlayers length %d != specs length %d", len(makePlayers), n)
+	}
+	if hands <= 0 {
+		return nil, fmt.Errorf("PlayN: hands must be > 0")
+	}
+	if cfg.BigBlind <= 0 || cfg.SmallBlind <= 0 {
+		return nil, fmt.Errorf("PlayN: invalid blinds")
+	}
+
+	stacks := make([]int, n)
+	for i := range stacks {
+		stacks[i] = cfg.StartingStack
+	}
+	rng := rand.New(rand.NewSource(rngSeed))
+
+	handsPlayed := 0
+	for h := 1; h <= hands; h++ {
+		// 破产检查:任一 seat 筹码 < BB 提前结束
+		bust := false
+		for _, s := range stacks {
+			if s < cfg.BigBlind {
+				bust = true
+				break
+			}
+		}
+		if bust {
+			break
+		}
+
+		button := (h - 1) % n
+		seats := make([]engine.PlayerSeat, n)
+		for i := 0; i < n; i++ {
+			seats[i] = engine.PlayerSeat{
+				ID:     i,
+				Stack:  stacks[i],
+				Player: makePlayers[i](),
+			}
+		}
+		_, result := engine.PlayHand(seats, button, cfg, rng, h)
+		stacks = result.FinalStacks
+		handsPlayed++
+	}
+
+	// 定最终赢家:筹码最高(并列给顺位最先)
+	winnerSeat := -1
+	best := -1
+	for i, s := range stacks {
+		if s > best {
+			best = s
+			winnerSeat = i
+		}
+	}
+
+	return &ResultN{
+		HandsPlayed: handsPlayed,
+		WinnerSeat:  winnerSeat,
+		FinalStacks: stacks,
+	}, nil
+}

@@ -1,6 +1,7 @@
 package match
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -167,5 +168,127 @@ func TestPlayWithoutStore(t *testing.T) {
 	}
 	if res.GameID != 0 {
 		t.Fatalf("GameID should be 0 when rec is nil, got %d", res.GameID)
+	}
+}
+
+// === PlayN 多人对局测试 ===
+
+// makeRuleBots 返回 N 个 RuleBot 工厂。
+func makeRuleBots(n int) []func() engine.Player {
+	out := make([]func() engine.Player, n)
+	for i := 0; i < n; i++ {
+		out[i] = func() engine.Player { return engine.RuleBot{} }
+	}
+	return out
+}
+
+func makeSpecs(n int) []PlayerSpec {
+	out := make([]PlayerSpec, n)
+	for i := 0; i < n; i++ {
+		out[i] = PlayerSpec{Provider: "test", Model: fmt.Sprintf("bot%d", i), Label: fmt.Sprintf("bot%d", i)}
+	}
+	return out
+}
+
+func TestPlayNThreePlayers(t *testing.T) {
+	specs := makeSpecs(3)
+	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	res, err := PlayN(specs, makeRuleBots(3), 5, cfg, 42)
+	if err != nil {
+		t.Fatalf("PlayN: %v", err)
+	}
+	if res.HandsPlayed == 0 {
+		t.Fatalf("expected hands played > 0")
+	}
+	if res.HandsPlayed > 5 {
+		t.Fatalf("hands played = %d, want <= 5", res.HandsPlayed)
+	}
+	if len(res.FinalStacks) != 3 {
+		t.Fatalf("final stacks len = %d, want 3", len(res.FinalStacks))
+	}
+	// 筹码守恒:3 人 × 1000 = 3000
+	sum := 0
+	for _, s := range res.FinalStacks {
+		sum += s
+	}
+	if sum != 3000 {
+		t.Fatalf("chips sum = %d, want 3000", sum)
+	}
+	// 必须有赢家(或 -1 全破产,不太可能 5 手内)
+	if res.WinnerSeat < 0 || res.WinnerSeat >= 3 {
+		t.Fatalf("winner seat = %d, want 0..2", res.WinnerSeat)
+	}
+}
+
+func TestPlayNSixPlayers(t *testing.T) {
+	specs := makeSpecs(6)
+	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	res, err := PlayN(specs, makeRuleBots(6), 3, cfg, 7)
+	if err != nil {
+		t.Fatalf("PlayN: %v", err)
+	}
+	if len(res.FinalStacks) != 6 {
+		t.Fatalf("final stacks len = %d, want 6", len(res.FinalStacks))
+	}
+	sum := 0
+	for _, s := range res.FinalStacks {
+		sum += s
+	}
+	if sum != 6000 {
+		t.Fatalf("chips sum = %d, want 6000", sum)
+	}
+}
+
+func TestPlayNValidatesSize(t *testing.T) {
+	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	// 1 人太少
+	if _, err := PlayN(makeSpecs(1), makeRuleBots(1), 1, cfg, 1); err == nil {
+		t.Fatalf("expected error for 1 player")
+	}
+	// 7 人太多
+	if _, err := PlayN(makeSpecs(7), makeRuleBots(7), 1, cfg, 1); err == nil {
+		t.Fatalf("expected error for 7 players")
+	}
+}
+
+func TestPlayNValidatesMakePlayersLength(t *testing.T) {
+	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	// specs=3 但 makePlayers=2
+	if _, err := PlayN(makeSpecs(3), makeRuleBots(2), 1, cfg, 1); err == nil {
+		t.Fatalf("expected error for mismatched makePlayers length")
+	}
+}
+
+func TestPlayNBankruptcyEarlyExit(t *testing.T) {
+	// 起始 stack 极小,几手内必破产
+	specs := makeSpecs(3)
+	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 20}
+	// alwaysCall 让所有人快速 all-in,很快一方破产
+	alwaysCallN := func(n int) []func() engine.Player {
+		out := make([]func() engine.Player, n)
+		for i := 0; i < n; i++ {
+			out[i] = func() engine.Player {
+				return engine.PlayerFromFunc(func(engine.Observation) engine.Action {
+					return engine.Action{Type: engine.Call}
+				})
+			}
+		}
+		return out
+	}
+	res, err := PlayN(specs, alwaysCallN(3), 100, cfg, 99)
+	if err != nil {
+		t.Fatalf("PlayN: %v", err)
+	}
+	if res.HandsPlayed >= 100 {
+		t.Fatalf("expected early exit (<100), got %d", res.HandsPlayed)
+	}
+	bustCount := 0
+	for _, s := range res.FinalStacks {
+		if s < cfg.BigBlind {
+			bustCount++
+		}
+	}
+	if bustCount == 0 {
+		t.Fatalf("expected at least 1 busted player")
 	}
 }
