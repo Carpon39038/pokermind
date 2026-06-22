@@ -37,3 +37,33 @@ func Update(ratingA, ratingB float64, score Score, k float64) (newA, newB float6
 	deltaB := k * (float64(1.0-score) - eB)
 	return ratingA + deltaA, ratingB + deltaB
 }
+
+// UpdateMulti 按一局 N 人桌结果更新 rating。
+//
+// 算法(赢家 vs 每个输家两两算,赢家取均值):
+//   - 对每个输家 l:用 Expected(winner, l) 算两人 ELO 增量
+//   - 赢家的新 rating = winnerRating + mean(对每个 l 的 winner 增量)
+//   - 每个输家 l 的新 rating = l + (单独一次两两计算的 l 增量)
+//
+// 这是多人桌业界常见做法(避免赢家对单个输家的 ELO 变化被夸大)。
+// 平局场景(没有真正赢家)留给上层处理 —— 本函数假定有单一明确赢家。
+//
+// loserRatings 为空时返回 (winnerRating 不变, nil)。
+// k <= 0 时用 DefaultK。
+func UpdateMulti(winnerRating float64, loserRatings []float64, k float64) (newWinner float64, newLosers []float64) {
+	if k <= 0 {
+		k = DefaultK
+	}
+	if len(loserRatings) == 0 {
+		return winnerRating, nil
+	}
+	winnerDeltaSum := 0.0
+	newLosers = make([]float64, len(loserRatings))
+	for i, lr := range loserRatings {
+		newW, newL := Update(winnerRating, lr, Win, k)
+		winnerDeltaSum += (newW - winnerRating)
+		newLosers[i] = newL
+	}
+	newWinner = winnerRating + winnerDeltaSum/float64(len(loserRatings))
+	return newWinner, newLosers
+}
