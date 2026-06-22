@@ -8,9 +8,15 @@ window.addEventListener('DOMContentLoaded', route);
 
 function route() {
   const hash = location.hash || '#/';
-  const m = hash.match(/^#\/game\/(\d+)$/);
-  if (m) {
+  let m;
+  if ((m = hash.match(/^#\/game\/(\d+)$/))) {
     renderGameReplay(parseInt(m[1], 10));
+  } else if (hash === '#/providers') {
+    renderProviders();
+  } else if (hash === '#/live') {
+    renderLiveConfig();
+  } else if ((m = hash.match(/^#\/live\/(.+)$/))) {
+    renderLiveWatch(m[1]);
   } else {
     renderGameList();
   }
@@ -288,4 +294,71 @@ function renderActions(hand, g) {
       </div>
     `;
   }).join('');
+}
+
+// ============ providers 配置页 ============
+async function renderProviders() {
+  app.innerHTML = `
+    <section class="page">
+      <h2 style="margin-top:0">LLM Providers</h2>
+      <table id="prov-table">
+        <thead><tr><th>name</th><th>kind</th><th>base_url</th><th>api_key</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>+ 新增 / 编辑</h3>
+      <form id="prov-form">
+        <input name="name" placeholder="name (unique)" required>
+        <select name="kind"><option value="openai">openai</option><option value="anthropic">anthropic</option></select>
+        <input name="base_url" placeholder="https://..." required>
+        <input name="api_key" placeholder="api_key (留空=不改;新建必填)">
+        <button type="submit">保存</button>
+      </form>
+      <p class="hint">kind=<code>openai</code>:DeepSeek/GLM/Qwen 等 OpenAI 兼容;kind=<code>anthropic</code>:Claude。base_url 不要带末尾 /。</p>
+    </section>
+  `;
+  await refreshProvidersTable();
+  document.getElementById('prov-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = Object.fromEntries(fd.entries());
+    const r = await fetch('/api/providers', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert(await r.text()); return; }
+    e.target.reset();
+    await refreshProvidersTable();
+  });
+}
+
+async function refreshProvidersTable() {
+  const tbody = document.querySelector('#prov-table tbody');
+  if (!tbody) return;
+  const r = await fetch('/api/providers');
+  const list = await r.json();
+  tbody.innerHTML = (list || []).map(p => `
+    <tr>
+      <td>${escapeHtml(p.name)}</td>
+      <td>${escapeHtml(p.kind)}</td>
+      <td>${escapeHtml(p.base_url)}</td>
+      <td><code>${escapeHtml(p.api_key)}</code></td>
+      <td><button data-name="${escapeHtml(p.name)}" class="del">删</button></td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('.del').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm(`删除 ${btn.dataset.name}?`)) return;
+      const r = await fetch('/api/providers/' + encodeURIComponent(btn.dataset.name), {method: 'DELETE'});
+      if (!r.ok) { alert(await r.text()); return; }
+      await refreshProvidersTable();
+    };
+  });
+}
+
+// 占位:live 配置 + 观战页在 Task 8 实现。
+async function renderLiveConfig() {
+  app.innerHTML = '<div class="empty">现场观战页即将上线(Task 8)。</div>';
+}
+function renderLiveWatch(matchID) {
+  app.innerHTML = `<div class="empty">match ${escapeHtml(matchID)} 观战页即将上线(Task 8)。</div>`;
 }
