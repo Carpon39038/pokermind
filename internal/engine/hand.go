@@ -1,6 +1,10 @@
 package engine
 
-import "math/rand"
+import (
+	"math/rand"
+
+	"pokermind/internal/sidepot"
+)
 
 // Player 是引擎认识的玩家。实现者可以是 RuleBot、LLMPlayer 等。
 // 引擎只调用 Decide,不关心玩家是谁、怎么想。
@@ -144,20 +148,21 @@ type ShowdownInfo struct {
 
 // handState 是一手牌的内部可变状态。
 type handState struct {
-	cfg       Config
-	seats     []PlayerSeat
-	stacks    []int   // 实时筹码(扣除已投入)
-	bets      []int   // 本街已投入
-	hole      [][]Card
-	community []Card
-	pot       int
-	street    Street
-	button    int   // 按钮位 seat 索引
-	sb        int   // SB 的 seat 索引
-	bb        int   // BB 的 seat 索引
-	folded    []bool
-	allIn     []bool
-	handID    int
+	cfg        Config
+	seats      []PlayerSeat
+	stacks     []int // 实时筹码(扣除已投入)
+	origStacks []int // 起始筹码副本;本手总投入 = origStacks[i] - stacks[i](sidepot 用)
+	bets       []int // 本街已投入
+	hole       [][]Card
+	community  []Card
+	pot        int
+	street     Street
+	button     int // 按钮位 seat 索引
+	sb         int // SB 的 seat 索引
+	bb         int // BB 的 seat 索引
+	folded     []bool
+	allIn      []bool
+	handID     int
 	deck      *Deck
 }
 
@@ -201,8 +206,9 @@ func setupHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 		street: Preflop,
 		deck:   NewDeck(WithRand(rng)),
 		seats:  append([]PlayerSeat(nil), seats...),
-		stacks: make([]int, n),
-		bets:   make([]int, n),
+		stacks:     make([]int, n),
+		origStacks: make([]int, n),
+		bets:       make([]int, n),
 		hole:   make([][]Card, n),
 		folded: make([]bool, n),
 		allIn:  make([]bool, n),
@@ -210,6 +216,7 @@ func setupHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handI
 	st.deck.Shuffle() // 构造的 deck 是顺序的,必须洗牌否则发牌固定
 	for i, s := range seats {
 		st.stacks[i] = s.Stack
+		st.origStacks[i] = s.Stack
 	}
 
 	var events []Event
@@ -567,43 +574,106 @@ func (st *handState) advanceStreet(events []Event) []Event {
 	return events
 }
 
-// settleShowdown 用 Evaluate/Best5 定赢家,返回(赢家列表, ShowdownInfo)。
-// 仅在 Heads-up(N=2)下使用;多人版在后续 task 改造(需走 sidepot)。
-func (st *handState) settleShowdown() ([]int, ShowdownInfo) {
-	all0 := append(append([]Card{}, st.hole[0]...), st.community...)
-	all1 := append(append([]Card{}, st.hole[1]...), st.community...)
-	r0 := Evaluate(all0)
-	r1 := Evaluate(all1)
-	info := ShowdownInfo{
-		Best5: [][]Card{Best5(all0), Best5(all1)},
-		Ranks: []HandRank{r0, r1},
+// contributions 返回每个 seat 本手总投入(用于 sidepot 分层)。
+// 投入 = 起始 stack - 当前 stack(钱从 stack 流到 pot)。
+func (st *handState) contributions() []int {
+	c := make([]int, len(st.seats))
+	for i := range st.seats {
+		c[i] = st.origStacks[i] - st.stacks[i]
+		if c[i] < 0 {
+			c[i] = 0
+		}
 	}
-	switch {
-	case r0.Compare(r1) > 0:
-		return []int{0}, info
-	case r0.Compare(r1) < 0:
-		return []int{1}, info
-	default:
-		return []int{0, 1}, info
-	}
+	return c
 }
 
-// awardPot 把 pot 分给赢家(平局平分,余数给首位),清零 pot。
-func (st *handState) awardPot(winners []int) {
-	n := len(winners)
-	if n == 0 {
-		return
-	}
-	share := st.pot / n
-	rem := st.pot - share*n
-	for i, w := range winners {
-		add := share
-		if i == 0 {
-			add += rem
+// settleShowdown 用 Evaluate/Best5 给每个未弃牌玩家评级,
+// 然后用 sidepot.Compute + Determine 按层级分发奖金。
+// 返回:
+//   winners  去重后的总赢家 seat 列表(用于事件流显示)
+//   info     ShowdownInfo(所有未弃牌玩家的 Best5/Ranks)
+//   payouts  每 seat 赢得的总额(用于 awardFromPayouts)
+func (st *handState) settleShowdown() (winners []int, info ShowdownInfo, payouts []int) {
+	n := len(st.seats)
+	info.Best5 = make([][]Card, n)
+	info.Ranks = make([]HandRank, n)
+
+	// 先把所有未弃牌玩家的牌力算出(含已弃牌的填零值,只为索引对齐)
+	contendingFlags := make([]bool, n)
+	for i := 0; i < n; i++ {
+		if st.folded[i] {
+			continue
 		}
-		st.stacks[w] += add
+		all := append(append([]Card{}, st.hole[i]...), st.community...)
+		info.Ranks[i] = Evaluate(all)
+		info.Best5[i] = Best5(all)
+		contendingFlags[i] = true
+	}
+
+	pots := sidepot.Compute(st.contributions(), contendingFlags)
+
+	// 每层 pot 的赢家 = 该层 eligible 里 Rank 最强的(并列都算)
+	winnersByPot := make([][]int, len(pots))
+	winnerSet := map[int]struct{}{}
+	for idx, pot := range pots {
+		if len(pot.Eligible) == 0 {
+			winnersByPot[idx] = nil
+			continue
+		}
+		// 找 eligible 里最强的 Rank
+		var bestRank HandRank
+		first := true
+		for _, s := range pot.Eligible {
+			if first || info.Ranks[s].Compare(bestRank) > 0 {
+				bestRank = info.Ranks[s]
+				first = false
+			}
+		}
+		// 收集所有达到该 Rank 的(并列)
+		var layerWinners []int
+		for _, s := range pot.Eligible {
+			if info.Ranks[s].Compare(bestRank) == 0 {
+				layerWinners = append(layerWinners, s)
+				winnerSet[s] = struct{}{}
+			}
+		}
+		winnersByPot[idx] = layerWinners
+	}
+
+	payouts = sidepot.Distribute(pots, winnersByPot)
+
+	for s := range winnerSet {
+		winners = append(winners, s)
+	}
+	// 排序保证事件流稳定(避免 map 迭代顺序)
+	for i := 1; i < len(winners); i++ {
+		for j := i; j > 0 && winners[j] < winners[j-1]; j-- {
+			winners[j], winners[j-1] = winners[j-1], winners[j]
+		}
+	}
+	return winners, info, payouts
+}
+
+// awardFromPayouts 按 payouts[i] 给每 seat 加奖金,清零 pot。
+func (st *handState) awardFromPayouts(payouts []int) {
+	for i, p := range payouts {
+		if i < len(st.stacks) {
+			st.stacks[i] += p
+		}
 	}
 	st.pot = 0
+}
+
+// awardFoldPot 在只剩 1 个未弃牌玩家时按 sidepot 分发(弃牌者的贡献保留
+// 但不争)。唯一未弃牌者通过"无人争"规则拿到每层 pot。
+func (st *handState) awardFoldPot(winner int) []int {
+	n := len(st.seats)
+	contending := make([]bool, n)
+	contending[winner] = true
+	pots := sidepot.Compute(st.contributions(), contending)
+	// 每层 winners=nil → Distribute 把金额给 eligible 顺位最先(就是 winner)
+	winnersByPot := make([][]int, len(pots))
+	return sidepot.Distribute(pots, winnersByPot)
 }
 
 // potTotal 返回当前 pot + 所有未结算的本街 bets。
@@ -647,25 +717,27 @@ func (st *handState) soleContender() int {
 	return winner
 }
 
-// PlayHand 完整跑完一手牌,返回事件流与结算结果。
+// PlayHand 完整跑完一手牌,返回事件流与结算结果。支持 N=2..6。
 //
-// 当前实现:
-//   - N=2..6 的盲注、发牌、下注轮(runStreet)均完整支持
-//   - 弃牌结算(只剩 1 个未弃牌玩家)完整支持
-//   - 摊牌结算:settleShowdown 仍只处理 N=2;N>=3 多人摊牌需走 sidepot
-//     (M3-6max Task 2e)。N>=3 一路打到摊牌会 panic。
+//   盲注、发牌、下注轮(runStreet)、弃牌结算、摊牌结算(含 sidepot)均完整。
 //
 // button 是按钮位 seat 索引。
 func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) ([]Event, HandResult) {
 	st, events := setupHand(seats, button, cfg, rng, handID)
 
 	finishByFold := func(winner int) ([]Event, HandResult) {
-		pot := st.potTotal()
-		events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: pot})
+		// 把本街 bets 并入 pot(弃牌者贡献保留但不争,由 sidepot 处理)
 		st.absorbBets()
-		st.awardPot([]int{winner})
+		payouts := st.awardFoldPot(winner)
+		st.awardFromPayouts(payouts)
+		// 事件 Amount = winner 实拿
+		got := 0
+		if winner < len(payouts) {
+			got = payouts[winner]
+		}
+		events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: got})
 		events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
-		return events, HandResult{Winners: []int{winner}, PotWon: pot, Folded: true, FinalStacks: append([]int(nil), st.stacks...)}
+		return events, HandResult{Winners: []int{winner}, PotWon: got, Folded: true, FinalStacks: append([]int(nil), st.stacks...)}
 	}
 
 	for {
@@ -691,14 +763,21 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 		}
 
 		if st.street == Showdown {
-			winners, info := st.settleShowdown() // 2e: 多人版改 sidepot
-			pot := st.pot
-			events = append(events, Event{Type: PotAwarded, Winners: winners, Amount: pot})
-			st.awardPot(winners)
+			winners, info, payouts := st.settleShowdown()
+			st.awardFromPayouts(payouts)
+			// 事件 Amount = 总奖池(所有 payouts 之和)
+			totalAward := 0
+			for _, p := range payouts {
+				totalAward += p
+			}
+			events = append(events, Event{Type: PotAwarded, Winners: winners, Amount: totalAward})
 			events = append(events, Event{Type: HandFinished, Winners: winners})
-			potWon := pot
-			if len(winners) > 1 {
-				potWon = pot / len(winners)
+			// PotWon:报告赢家中最多的(主要赢家)
+			potWon := 0
+			for _, w := range winners {
+				if w < len(payouts) && payouts[w] > potWon {
+					potWon = payouts[w]
+				}
 			}
 			return events, HandResult{Winners: winners, PotWon: potWon, Folded: false, Showdown: &info, FinalStacks: append([]int(nil), st.stacks...)}
 		}

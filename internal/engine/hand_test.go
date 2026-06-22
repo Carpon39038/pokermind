@@ -542,3 +542,127 @@ func TestPlayHandThreePlayersBlinds(t *testing.T) {
 		t.Fatalf("stacks = %v, want [1000 995 990]", st.stacks)
 	}
 }
+
+// TestPlayHandThreePlayersShowdown 三人 always-call 跑到摊牌,验证:
+//   - 不再 panic(N>=3 settle 已用 sidepot)
+//   - 筹码守恒
+//   - ShowdownInfo 填了三个 seat 的 Ranks/Best5
+//   - 总赢家拿到最多钱
+func TestPlayHandThreePlayersShowdown(t *testing.T) {
+	seats := []PlayerSeat{
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 2, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	events, result := PlayHand(seats, 0, cfg, makeRng(42), 1)
+
+	if result.Folded {
+		t.Fatalf("expected showdown, got fold")
+	}
+	if result.Showdown == nil {
+		t.Fatalf("expected ShowdownInfo")
+	}
+	if len(result.Showdown.Ranks) != 3 {
+		t.Fatalf("Ranks len = %d, want 3", len(result.Showdown.Ranks))
+	}
+	if len(result.Showdown.Best5) != 3 {
+		t.Fatalf("Best5 len = %d, want 3", len(result.Showdown.Best5))
+	}
+	// 筹码守恒
+	sum := 0
+	for _, s := range result.FinalStacks {
+		sum += s
+	}
+	if sum != 3000 {
+		t.Fatalf("chips sum = %d, want 3000", sum)
+	}
+	// 必须有赢家
+	if len(result.Winners) == 0 {
+		t.Fatalf("no winners")
+	}
+	// 街推进:flop/turn/river/showdown = 4
+	advCount := 0
+	for _, e := range events {
+		if e.Type == StreetAdvanced {
+			advCount++
+		}
+	}
+	if advCount != 4 {
+		t.Fatalf("street advance count = %d, want 4", advCount)
+	}
+}
+
+// TestPlayHandThreePlayersSidePot 三人,SB 短筹 all-in、其他两人深入。
+// 验证边池:短筹玩家只能赢主池(三人共同部分),深入的两人在边池里争。
+func TestPlayHandThreePlayersSidePot(t *testing.T) {
+	// seat0 (SB): stack=20,投 SB 5 后剩 15 → 第一次决策 all-in(call-to 20)
+	// seat1 (BB): stack=1000,正常
+	// seat2:    stack=1000,正常
+	// 都 alwaysCall,seat0 all-in 后另两人继续,最后三人摊牌
+	// 主池(三人各 20)= 60,边池(seat1+seat2 各补超出的部分)= 其余
+	sbDecide := func(obs Observation) Action {
+		if obs.MyBet < 20 && obs.MyStack > 0 {
+			// 第一次行动把剩余全押(call/raise to 20)
+			target := obs.MyBet + obs.MyStack
+			if target < obs.ToCall+obs.MyBet {
+				target = obs.ToCall + obs.MyBet
+			}
+			if target <= obs.MyStack+obs.MyBet {
+				return Action{Type: Raise, Amount: obs.MyStack + obs.MyBet}
+			}
+		}
+		return Action{Type: Call}
+	}
+	seats := []PlayerSeat{
+		{ID: 0, Stack: 20, Player: PlayerFromFunc(sbDecide)},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 2, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	_, result := PlayHand(seats, 0, cfg, makeRng(7), 1)
+
+	// 筹码守恒
+	sum := 0
+	for _, s := range result.FinalStacks {
+		sum += s
+	}
+	if sum != 2020 {
+		t.Fatalf("chips sum = %d, want 2020", sum)
+	}
+	// seat0 all-in 最多投 20,他即使赢也只能拿三人共同部分(60)中的他应得份额
+	// 所以 seat0 最终 stack 应 <= 60(实际取决于是否赢主池)
+	if result.FinalStacks[0] > 60 {
+		t.Fatalf("seat0 (short stack all-in) final = %d, must be <= 60 (main pot only)", result.FinalStacks[0])
+	}
+	// seat1/seat2 不应负数
+	if result.FinalStacks[1] < 0 || result.FinalStacks[2] < 0 {
+		t.Fatalf("stacks should be non-negative: %v", result.FinalStacks)
+	}
+}
+
+// TestPlayHandSixPlayersSmoke 6 人桌 always-call 跑到摊牌不 panic + 守恒。
+func TestPlayHandSixPlayersSmoke(t *testing.T) {
+	seats := []PlayerSeat{
+		{ID: 0, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 1, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 2, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 3, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 4, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+		{ID: 5, Stack: 1000, Player: PlayerFromFunc(alwaysCall())},
+	}
+	cfg := Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
+	_, result := PlayHand(seats, 0, cfg, makeRng(99), 1)
+
+	// 6 人各 1000,总 6000
+	sum := 0
+	for _, s := range result.FinalStacks {
+		sum += s
+	}
+	if sum != 6000 {
+		t.Fatalf("chips sum = %d, want 6000", sum)
+	}
+	if len(result.FinalStacks) != 6 {
+		t.Fatalf("final stacks len = %d, want 6", len(result.FinalStacks))
+	}
+}
