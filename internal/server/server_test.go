@@ -287,3 +287,30 @@ func TestProvidersAPI_CRUD(t *testing.T) {
 		t.Fatalf("delete status = %d", w.Code)
 	}
 }
+
+func TestMatchesAPI_StartRejectsBadRequests(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	// 没有 provider:400
+	body := strings.NewReader(`{"seats":[{"provider":"deepseek","model":"x"},{"provider":"deepseek","model":"y"}],"hands":2}`)
+	req := httptest.NewRequest("POST", "/api/matches", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 400 {
+		t.Errorf("want 400 for missing provider, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// 加一个 provider
+	_, _ = st.UpsertProvider("deepseek", "openai", "https://api.deepseek.com", "sk-x")
+
+	// seat 数 < 2:400
+	body = strings.NewReader(`{"seats":[{"provider":"deepseek","model":"x"}],"hands":2}`)
+	req = httptest.NewRequest("POST", "/api/matches", body)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 400 {
+		t.Errorf("want 400 for 1 seat, got %d", w.Code)
+	}
+}

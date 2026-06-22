@@ -3,13 +3,20 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"pokermind/internal/engine"
+	"pokermind/internal/match"
+	"pokermind/internal/players"
+	"pokermind/internal/players/providers"
 	"pokermind/internal/store"
 )
 
@@ -18,6 +25,18 @@ type Server struct {
 	store     *store.Store
 	staticDir string
 	mux       *http.ServeMux
+
+	liveMu sync.Mutex
+	live   *liveMatch
+}
+
+type liveMatch struct {
+	id        string
+	cancel    context.CancelFunc
+	startedAt time.Time
+	subsMu    sync.Mutex
+	subs      map[chan match.LiveEvent]struct{}
+	done      chan struct{} // RunLive 结束后关闭
 }
 
 // New 构造一个 Server。staticDir 是前端静态文件目录(绝对或相对路径)。
@@ -34,6 +53,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/games/", s.handleGameDetail) // 末尾斜杠匹配子路径
 	s.mux.HandleFunc("/api/providers", s.handleProviders)
 	s.mux.HandleFunc("/api/providers/", s.handleProviderByName)
+	s.mux.HandleFunc("/api/matches", s.handleMatchesStart)
+	s.mux.HandleFunc("/api/matches/current", s.handleMatchCurrent)
+	s.mux.HandleFunc("/api/matches/current/stream", s.handleMatchStream)
+	s.mux.HandleFunc("/api/matches/current/stop", s.handleMatchStop)
 	if s.staticDir != "" {
 		// /static/* 直接映射到 staticDir 下文件
 		fs := http.FileServer(http.Dir(s.staticDir))
@@ -212,4 +235,214 @@ func (s *Server) handleProviderByName(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleMatchesStart: POST /api/matches
+// body: {seats:[{provider, model}], hands, seed?, sb?, bb?, starting_stack?}
+func (s *Server) handleMatchesStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.liveMu.Lock()
+	if s.live != nil {
+		s.liveMu.Unlock()
+		writeError(w, http.StatusConflict, fmt.Errorf("a match is already running"))
+		return
+	}
+	s.liveMu.Unlock()
+
+	var body struct {
+		Seats []struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		} `json:"seats"`
+		Hands         int   `json:"hands"`
+		Seed          int64 `json:"seed"`
+		SmallBlind    int   `json:"sb"`
+		BigBlind      int   `json:"bb"`
+		StartingStack int   `json:"starting_stack"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+		return
+	}
+	if len(body.Seats) < 2 || len(body.Seats) > 6 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("seats must be 2-6, got %d", len(body.Seats)))
+		return
+	}
+	if body.Hands <= 0 {
+		body.Hands = 20
+	}
+	if body.SmallBlind <= 0 {
+		body.SmallBlind = 5
+	}
+	if body.BigBlind <= 0 {
+		body.BigBlind = 10
+	}
+	if body.StartingStack <= 0 {
+		body.StartingStack = 1000
+	}
+
+	httpClient := providers.DefaultHTTPClient(0)
+	var specs []match.PlayerSpec
+	var makePlayers []func() engine.Player
+	for _, seat := range body.Seats {
+		pcfg, err := s.store.GetProviderByName(seat.Provider)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("lookup provider %q: %w", seat.Provider, err))
+			return
+		}
+		if pcfg == nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("provider %q not found", seat.Provider))
+			return
+		}
+		if pcfg.APIKey == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("provider %q has empty api_key", seat.Provider))
+			return
+		}
+		specs = append(specs, match.PlayerSpec{
+			Provider: seat.Provider,
+			Model:    seat.Model,
+			Label:    fmt.Sprintf("%s:%s", seat.Provider, seat.Model),
+		})
+		kind, baseURL, apiKey, model := pcfg.Kind, pcfg.BaseURL, pcfg.APIKey, seat.Model
+		makePlayers = append(makePlayers, func() engine.Player {
+			p, err := providers.ByKind(kind, baseURL, apiKey, httpClient)
+			if err != nil {
+				return newPanicPlayer(err)
+			}
+			return &players.LLMPlayer{Provider: p, Model: model}
+		})
+	}
+
+	matchID := fmt.Sprintf("m-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	s.liveMu.Lock()
+	if s.live != nil {
+		s.liveMu.Unlock()
+		cancel()
+		writeError(w, http.StatusConflict, fmt.Errorf("a match is already running"))
+		return
+	}
+	s.live = &liveMatch{
+		id:        matchID,
+		cancel:    cancel,
+		startedAt: time.Now(),
+		subs:      map[chan match.LiveEvent]struct{}{},
+		done:      make(chan struct{}),
+	}
+	lm := s.live
+	s.liveMu.Unlock()
+
+	go s.runLiveAndDistribute(ctx, lm, specs, makePlayers, body.Hands, body.Seed,
+		engine.Config{SmallBlind: body.SmallBlind, BigBlind: body.BigBlind, StartingStack: body.StartingStack})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"match_id": matchID,
+	})
+}
+
+// runLiveAndDistribute 跑 RunLive,把它发出的事件 fan-out 到所有订阅者。
+func (s *Server) runLiveAndDistribute(
+	ctx context.Context,
+	lm *liveMatch,
+	specs []match.PlayerSpec,
+	makePlayers []func() engine.Player,
+	hands int,
+	seed int64,
+	cfg engine.Config,
+) {
+	defer close(lm.done)
+	defer func() {
+		if r := recover(); r != nil {
+			ev := match.LiveEvent{Type: match.EvError}
+			ev.Payload, _ = json.Marshal(map[string]any{"error": fmt.Sprintf("panic: %v", r)})
+			s.broadcast(lm, ev)
+		}
+	}()
+
+	out := make(chan match.LiveEvent, 256)
+	doneRun := make(chan struct{})
+	go func() {
+		defer close(doneRun)
+		defer close(out)
+		_, _ = match.RunLive(ctx, specs, makePlayers, hands, cfg, seed, s.store, out)
+	}()
+
+	for ev := range out {
+		s.broadcast(lm, ev)
+	}
+	<-doneRun
+
+	s.liveMu.Lock()
+	if s.live == lm {
+		s.live = nil
+	}
+	s.liveMu.Unlock()
+}
+
+// broadcast 把 ev 非阻塞地发给所有订阅者;sub 满则丢事件。
+func (s *Server) broadcast(lm *liveMatch, ev match.LiveEvent) {
+	lm.subsMu.Lock()
+	defer lm.subsMu.Unlock()
+	for ch := range lm.subs {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
+}
+
+// handleMatchCurrent: GET /api/matches/current
+func (s *Server) handleMatchCurrent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.liveMu.Lock()
+	lm := s.live
+	s.liveMu.Unlock()
+	if lm == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"running": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running":    true,
+		"match_id":   lm.id,
+		"started_at": lm.startedAt.Format(time.RFC3339),
+	})
+}
+
+// handleMatchStop: POST /api/matches/current/stop
+func (s *Server) handleMatchStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.liveMu.Lock()
+	lm := s.live
+	s.liveMu.Unlock()
+	if lm == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no running match"))
+		return
+	}
+	lm.cancel()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelling"})
+}
+
+// handleMatchStream 见 Task 5c 实现。
+func (s *Server) handleMatchStream(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "not implemented", http.StatusNotImplemented)
+}
+
+// panicPlayer 用于 provider 工厂失败时占位,Decide 直接 fold。
+type panicPlayer struct{ err error }
+
+func newPanicPlayer(err error) *panicPlayer { return &panicPlayer{err: err} }
+
+func (p *panicPlayer) Decide(obs engine.Observation) engine.Action {
+	return engine.Action{Type: engine.Fold}
 }
