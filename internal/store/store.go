@@ -103,6 +103,16 @@ CREATE TABLE IF NOT EXISTS actions (
 CREATE INDEX IF NOT EXISTS idx_actions_hand ON actions(hand_id);
 CREATE INDEX IF NOT EXISTS idx_actions_player ON actions(player_id);
 CREATE INDEX IF NOT EXISTS idx_hands_game ON hands(game_id);
+
+CREATE TABLE IF NOT EXISTS providers (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    kind        TEXT NOT NULL,
+    base_url    TEXT NOT NULL,
+    api_key     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 `
 	_, err := s.db.Exec(schema)
 	if err != nil {
@@ -713,4 +723,122 @@ func (s *Store) GetGame(gameID int64) (*GameDetail, error) {
 		g.Hands = append(g.Hands, *handByIndex[idx])
 	}
 	return &g, nil
+}
+
+// ProviderCfg 是 providers 表的一行。
+type ProviderCfg struct {
+	ID        int64
+	Name      string
+	Kind      string
+	BaseURL   string
+	APIKey    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ListProviders 返回所有 provider,按 name 升序。
+func (s *Store) ListProviders() ([]ProviderCfg, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, kind, base_url, api_key, created_at, updated_at
+		FROM providers
+		ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list providers: %w", err)
+	}
+	defer rows.Close()
+	var out []ProviderCfg
+	for rows.Next() {
+		var p ProviderCfg
+		var created, updated string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &created, &updated); err != nil {
+			return nil, fmt.Errorf("scan provider: %w", err)
+		}
+		p.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		p.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// GetProviderByName 按 name 精确查。不存在返回 (nil, nil)。
+func (s *Store) GetProviderByName(name string) (*ProviderCfg, error) {
+	var p ProviderCfg
+	var created, updated string
+	err := s.db.QueryRow(`
+		SELECT id, name, kind, base_url, api_key, created_at, updated_at
+		FROM providers WHERE name = ?
+	`, name).Scan(&p.ID, &p.Name, &p.Kind, &p.BaseURL, &p.APIKey, &created, &updated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get provider %q: %w", name, err)
+	}
+	p.CreatedAt, _ = time.Parse(time.RFC3339, created)
+	p.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
+	return &p, nil
+}
+
+// UpsertProvider 按 name UNIQUE upsert。
+//   - name 不存在 → INSERT。
+//   - name 存在   → UPDATE kind, base_url;apiKey == "" 时保留原 key,否则覆盖。
+func (s *Store) UpsertProvider(name, kind, baseURL, apiKey string) (*ProviderCfg, error) {
+	if name == "" {
+		return nil, fmt.Errorf("UpsertProvider: name empty")
+	}
+	if kind == "" {
+		return nil, fmt.Errorf("UpsertProvider: kind empty")
+	}
+	if baseURL == "" {
+		return nil, fmt.Errorf("UpsertProvider: baseURL empty")
+	}
+	now := time.Now().Format(time.RFC3339)
+
+	existing, err := s.GetProviderByName(name)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		if apiKey == "" {
+			return nil, fmt.Errorf("UpsertProvider: apiKey required for new provider %q", name)
+		}
+		_, err := s.db.Exec(
+			`INSERT INTO providers(name, kind, base_url, api_key, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			name, kind, baseURL, apiKey, now, now,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("insert provider: %w", err)
+		}
+	} else {
+		newKey := apiKey
+		if newKey == "" {
+			newKey = existing.APIKey
+		}
+		_, err := s.db.Exec(
+			`UPDATE providers SET kind=?, base_url=?, api_key=?, updated_at=? WHERE id=?`,
+			kind, baseURL, newKey, now, existing.ID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update provider: %w", err)
+		}
+	}
+	return s.GetProviderByName(name)
+}
+
+// DeleteProvider 删除一个 provider。不存在返回 error。
+func (s *Store) DeleteProvider(name string) error {
+	res, err := s.db.Exec(`DELETE FROM providers WHERE name=?`, name)
+	if err != nil {
+		return fmt.Errorf("delete provider: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete provider: %q not found", name)
+	}
+	return nil
 }
