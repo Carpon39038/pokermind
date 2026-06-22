@@ -314,3 +314,18 @@ func TestMatchesAPI_StartRejectsBadRequests(t *testing.T) {
 		t.Errorf("want 400 for 1 seat, got %d", w.Code)
 	}
 }
+
+func TestMatchStream_NoRunning(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/matches/current/stream", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "no_running") {
+		t.Errorf("body should contain no_running marker: %q", body)
+	}
+}

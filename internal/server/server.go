@@ -433,9 +433,74 @@ func (s *Server) handleMatchStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelling"})
 }
 
-// handleMatchStream 见 Task 5c 实现。
+// handleMatchStream: GET /api/matches/current/stream  (SSE)
+//
+//	若无 running match,写一条 event: no_running 后关闭。
+//	若有,订阅 live.subs,逐条写 event:<type>\ndata:<json>\n\n。
+//	客户端断开或 done 后关闭。
 func (s *Server) handleMatchStream(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	s.liveMu.Lock()
+	lm := s.live
+	s.liveMu.Unlock()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	if lm == nil {
+		_, _ = fmt.Fprintf(w, "event: no_running\ndata: {}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	sub := make(chan match.LiveEvent, 256)
+	lm.subsMu.Lock()
+	lm.subs[sub] = struct{}{}
+	lm.subsMu.Unlock()
+
+	defer func() {
+		lm.subsMu.Lock()
+		delete(lm.subs, sub)
+		lm.subsMu.Unlock()
+	}()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-lm.done:
+			for {
+				select {
+				case ev := <-sub:
+					writeSSE(w, ev)
+					flusher.Flush()
+				default:
+					return
+				}
+			}
+		case ev := <-sub:
+			writeSSE(w, ev)
+			flusher.Flush()
+		}
+	}
+}
+
+// writeSSE 写一个 SSE 帧:event: <type>\ndata: <json>\n\n
+func writeSSE(w http.ResponseWriter, ev match.LiveEvent) {
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, ev.Payload)
 }
 
 // panicPlayer 用于 provider 工厂失败时占位,Decide 直接 fold。
