@@ -163,11 +163,13 @@ func runCmd(args []string) {
 	}
 }
 
-// matchCmd: pokermind match --p1 provider:model --p2 provider:model [--hands N] [--seed S] [--db path] [--verbose]
+// matchCmd: pokermind match --players p1,p2[,...] [--hands N] [--seed S] [--db path]
+// 兼容旧 --p1/--p2(仅 2 人)
 func matchCmd(args []string) {
 	fs := flag.NewFlagSet("match", flag.ExitOnError)
-	p1Spec := fs.String("p1", "", "player 1 spec provider:model")
-	p2Spec := fs.String("p2", "", "player 2 spec provider:model")
+	playersSpec := fs.String("players", "", "comma-separated player specs provider:model (2-6 players)")
+	p1Spec := fs.String("p1", "", "(legacy) player 1 spec provider:model")
+	p2Spec := fs.String("p2", "", "(legacy) player 2 spec provider:model")
 	hands := fs.Int("hands", 100, "hands per match")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	dbPath := fs.String("db", "pokermind.db", "SQLite path")
@@ -175,35 +177,46 @@ func matchCmd(args []string) {
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
-	if *p1Spec == "" || *p2Spec == "" {
-		fmt.Fprintln(os.Stderr, "ERROR: --p1 and --p2 are required (provider:model)")
+
+	// 解析玩家列表:优先 --players,fallback 到 --p1/--p2(2 人)
+	var specStrs []string
+	if *playersSpec != "" {
+		for _, s := range strings.Split(*playersSpec, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				specStrs = append(specStrs, s)
+			}
+		}
+	} else if *p1Spec != "" && *p2Spec != "" {
+		specStrs = []string{*p1Spec, *p2Spec}
+	}
+	if len(specStrs) < 2 || len(specStrs) > 6 {
+		fmt.Fprintf(os.Stderr, "ERROR: need 2-6 players (got %d). Use --players p1,p2,... or --p1/--p2\n", len(specStrs))
 		os.Exit(2)
 	}
 
-	p1Prov, p1Model, err := parsePlayerSpec(*p1Spec)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err)
-		os.Exit(2)
-	}
-	p2Prov, p2Model, err := parsePlayerSpec(*p2Spec)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err)
-		os.Exit(2)
-	}
-
+	var specs []match.PlayerSpec
+	var makePlayers []func() engine.Player
 	timeoutSec := envInt("POKERMIND_HTTP_TIMEOUT_SECONDS", 60)
 	httpClient := providers.DefaultHTTPClient(timeoutSec)
 
-	// makePlayer 工厂:每次 match.Play 调用前生成新的 LLMPlayer(避免共享状态)
-	makePlayer := func(provider, model string) func() engine.Player {
-		return func() engine.Player {
-			p, err := newLLMPlayer(provider, model, httpClient)
+	for _, specStr := range specStrs {
+		prov, model, err := parsePlayerSpec(specStr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(2)
+		}
+		specs = append(specs, match.PlayerSpec{Provider: prov, Model: model, Label: model})
+		// 捕获循环变量(避免闭包陷阱)
+		p, m := prov, model
+		makePlayers = append(makePlayers, func() engine.Player {
+			player, err := newLLMPlayer(p, m, httpClient)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "ERROR:", err)
 				os.Exit(1)
 			}
-			return p
-		}
+			return player
+		})
 	}
 
 	rec, err := store.Open(*dbPath)
@@ -213,14 +226,16 @@ func matchCmd(args []string) {
 	}
 	defer rec.Close()
 
-	spec1 := match.PlayerSpec{Provider: p1Prov, Model: p1Model, Label: p1Model}
-	spec2 := match.PlayerSpec{Provider: p2Prov, Model: p2Model, Label: p2Model}
-
-	fmt.Printf("=== Match: %s vs %s, %d hands, seed=%d ===\n", spec1.Label, spec2.Label, *hands, *seed)
+	// 打印对局标题
+	labels := make([]string, len(specs))
+	for i, s := range specs {
+		labels[i] = s.Label
+	}
+	fmt.Printf("=== Match (%d-max): %s, %d hands, seed=%d ===\n", len(specs), strings.Join(labels, " vs "), *hands, *seed)
 	started := time.Now()
 
 	cfg := engine.Config{SmallBlind: 5, BigBlind: 10, StartingStack: 1000}
-	res, err := match.Play(spec1, spec2, makePlayer(p1Prov, p1Model), makePlayer(p2Prov, p2Model), *hands, cfg, rec, *seed)
+	res, err := match.PlayN(specs, makePlayers, *hands, cfg, *seed, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
@@ -228,22 +243,22 @@ func matchCmd(args []string) {
 
 	elapsed := time.Since(started).Round(time.Second)
 	winnerLabel := "draw"
-	switch res.Winner {
-	case 0:
-		winnerLabel = spec1.Label
-	case 1:
-		winnerLabel = spec2.Label
+	if res.WinnerSeat >= 0 && res.WinnerSeat < len(labels) {
+		winnerLabel = labels[res.WinnerSeat]
 	}
 	fmt.Printf("\n=== Match over: winner=%s, %d hands played, elapsed=%v ===\n", winnerLabel, res.HandsPlayed, elapsed)
-	fmt.Printf("    final chips: %s=%d  %s=%d\n", spec1.Label, res.FinalStacks[0], spec2.Label, res.FinalStacks[1])
-	// Result.EloChange 现在是 []float64,长度为 2(N=2 时)
-	eloChange1 := float64(0)
-	eloChange2 := float64(0)
-	if len(res.EloChange) >= 2 {
-		eloChange1 = res.EloChange[0]
-		eloChange2 = res.EloChange[1]
+	// 打印所有 seat 最终筹码 + ELO 变化
+	for i, label := range labels {
+		eloChange := 0.0
+		if i < len(res.EloChange) {
+			eloChange = res.EloChange[i]
+		}
+		chips := 0
+		if i < len(res.FinalStacks) {
+			chips = res.FinalStacks[i]
+		}
+		fmt.Printf("    seat%d %-24s chips=%-6d elo=%+-d\n", i, label, chips, int(eloChange))
 	}
-	fmt.Printf("    ELO change:  %s=%+d  %s=%+d\n", spec1.Label, int(eloChange1), spec2.Label, int(eloChange2))
 
 	printLeaderboard(rec)
 	_ = verbose // verbose 模式留待后续在 match 包加 hook

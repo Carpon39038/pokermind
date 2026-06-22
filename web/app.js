@@ -83,22 +83,20 @@ async function renderGameList() {
       return;
     }
     const rows = games.map(g => {
+      const started = new Date(g.started_at).toLocaleString('zh-CN', { hour12: false });
+      // 玩家列表:每个 player 一段 label + chips;赢家加粗
+      const playerCells = (g.players || []).map(p => {
+        const cls = p.is_winner ? 'player player-winner' : 'player';
+        return `<div class="${cls}"><span class="player-label">${escapeHtml(p.label)}</span><span class="player-chips">${p.final_chips}</span></div>`;
+      }).join('<span class="vs">vs</span>');
       const winnerBadge = g.is_draw
         ? '<span class="winner-badge draw">平局</span>'
-        : `<span class="winner-badge">${escapeHtml(g.winner_label)} 赢</span>`;
-      const started = new Date(g.started_at).toLocaleString('zh-CN', { hour12: false });
+        : `<span class="winner-badge">有赢家</span>`;
+      const seatCount = g.num_seats || (g.players || []).length;
       return `
         <a class="game-row" href="#/game/${g.id}">
-          <span class="game-id">#${g.id}</span>
-          <div class="player">
-            <span class="player-label">${escapeHtml(g.p1_label)}</span>
-            <span class="player-chips">${g.p1_final}</span>
-          </div>
-          <span class="vs">vs</span>
-          <div class="player">
-            <span class="player-label">${escapeHtml(g.p2_label)}</span>
-            <span class="player-chips">${g.p2_final}</span>
-          </div>
+          <span class="game-id">#${g.id} ·${seatCount}max</span>
+          <span class="players-cell">${playerCells}</span>
           <span>${winnerBadge}</span>
           <span class="hand-count">${g.hands_played} 手<br>${started}</span>
         </a>`;
@@ -132,53 +130,42 @@ function renderReplay() {
   const g = currentGame;
   if (!g) return;
   const totalHands = g.hands.length;
+  const players = g.players || [];
 
-  const winnerBadge = g.is_draw
+  // 赢家徽章:列出所有 is_winner 的 player label
+  const winnerLabels = players.filter(p => p.is_winner).map(p => p.label);
+  const winnerBadge = g.is_draw || winnerLabels.length === 0
     ? '<span class="winner-badge draw">平局</span>'
-    : `<span class="winner-badge">${escapeHtml(g.winner_label)} 赢</span>`;
+    : `<span class="winner-badge">${winnerLabels.map(escapeHtml).join(' / ')} 赢</span>`;
 
   // 时间轴
   const handChips = g.hands.map(h => {
     const cls = h.hand_index === currentHandIndex ? 'hand-chip current' : 'hand-chip';
-    const winnerTag = h.is_draw ? '平' : (h.winner_label === g.p1_label ? 'P1' : 'P2');
     return `<span class="${cls}" data-hand="${h.hand_index}" title="手 ${h.hand_index}">${h.hand_index}${h.folded ? '·F' : '·S'}</span>`;
   }).join('');
 
   const hand = g.hands.find(h => h.hand_index === currentHandIndex) || g.hands[0];
+  const seatHtml = renderSeats(players, hand);
 
-  // 双玩家面板。button_seat 0 表示 seat0(P1)是按钮(SB)
-  const p1IsButton = hand.button_seat === 0;
-  const p1Class = ['seat', 'seat-1'];
-  const p2Class = ['seat', 'seat-2'];
+  // 标题:列出所有玩家 label(N=2 紧凑,N>2 时省略中间)
+  const titleLabels = players.length <= 3
+    ? players.map(p => escapeHtml(p.label)).join(' vs ')
+    : `${escapeHtml(players[0].label)} vs ... vs ${escapeHtml(players[players.length-1].label)} (${players.length}max)`;
 
   app.innerHTML = `
     <div class="replay-header">
       <a href="#/" class="back-link">← 返回列表</a>
-      <h2>${escapeHtml(g.p1_label)} vs ${escapeHtml(g.p2_label)}</h2>
+      <h2>${titleLabels}</h2>
       ${winnerBadge}
       <span style="color:var(--text-dim);font-size:12px">${g.hands_played} 手 · ${escapeHtml(g.started_at)}</span>
     </div>
 
-    <div class="table">
+    <div class="table table-${players.length}">
       <div class="street-badge">${escapeHtml(handStreetLabel(hand))} · 手 ${hand.hand_index}</div>
-
-      <div class="${p1Class.join(' ')}">
-        <span class="seat-name">${escapeHtml(g.p1_label)}</span>
-        <span class="seat-pos">${p1IsButton ? 'SB · 按钮' : 'BB'}</span>
-        <span class="seat-cards">${renderCards(hand.p1_hole)}</span>
-        <span class="seat-stack">stack ${g.p1_final}</span>
-      </div>
-
+      <div class="seats-ring">${seatHtml}</div>
       <div class="community-area">
         <div class="community-cards">${renderCards(hand.community)}</div>
         <div class="pot">底池 <span class="amount">${hand.pot}</span></div>
-      </div>
-
-      <div class="${p2Class.join(' ')}">
-        <span class="seat-name">${escapeHtml(g.p2_label)}</span>
-        <span class="seat-pos">${p1IsButton ? 'BB' : 'SB · 按钮'}</span>
-        <span class="seat-cards">${renderCards(hand.p2_hole)}</span>
-        <span class="seat-stack">stack ${g.p2_final}</span>
       </div>
     </div>
 
@@ -201,7 +188,6 @@ function renderReplay() {
     </div>
   `;
 
-  // 绑定时间轴点击
   document.querySelectorAll('.hand-chip').forEach(el => {
     el.addEventListener('click', () => {
       currentHandIndex = parseInt(el.dataset.hand, 10);
@@ -215,7 +201,6 @@ function renderReplay() {
     if (currentHandIndex < totalHands) { currentHandIndex++; renderReplay(); }
   });
 
-  // 键盘 ← →
   document.onkeydown = (e) => {
     if (e.key === 'ArrowLeft' && currentHandIndex > 1) {
       currentHandIndex--; renderReplay();
@@ -223,6 +208,34 @@ function renderReplay() {
       currentHandIndex++; renderReplay();
     }
   };
+}
+
+// renderSeats 渲染所有 seat 围绕牌桌。N=2 左右,N>=3 上方/侧边环绕。
+// 每个 seat 显示 label/位置(SB/BB/BTN/UTG)/底牌/最终筹码。
+function renderSeats(players, hand) {
+  const n = players.length;
+  // player_holes 是 seat-indexed 数组
+  const holes = hand.player_holes || [];
+  return players.map((p, i) => {
+    const isButton = hand.button_seat === i;
+    let posTag = 'UTG';
+    if (n === 2) {
+      posTag = isButton ? 'SB · 按钮' : 'BB';
+    } else {
+      if (isButton) posTag = 'BTN';
+      else if (i === (hand.button_seat + 1) % n) posTag = 'SB';
+      else if (i === (hand.button_seat + 2) % n) posTag = 'BB';
+    }
+    const hole = holes[i] || '';
+    const winnerCls = p.is_winner ? ' seat-winner' : '';
+    return `
+      <div class="seat seat-${i} seat-pos-${i}${winnerCls}" data-seat="${i}">
+        <span class="seat-name">${escapeHtml(p.label)}</span>
+        <span class="seat-pos">${posTag}</span>
+        <span class="seat-cards">${renderCards(hole)}</span>
+        <span class="seat-stack">stack ${p.final_chips}</span>
+      </div>`;
+  }).join('');
 }
 
 function handStreetLabel(hand) {
