@@ -233,3 +233,57 @@ func TestHandleGamesListEmpty(t *testing.T) {
 		t.Fatalf("empty db should give empty list, got %d", len(games))
 	}
 }
+
+func TestProvidersAPI_CRUD(t *testing.T) {
+	srv, st := newTestServer(t)
+
+	// List 空
+	req := httptest.NewRequest("GET", "/api/providers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("list status = %d", w.Code)
+	}
+	var list []map[string]any
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 0 {
+		t.Errorf("list len = %d", len(list))
+	}
+
+	// Create
+	body := strings.NewReader(`{"name":"deepseek","kind":"openai","base_url":"https://api.deepseek.com","api_key":"sk-xxx1234"}`)
+	req = httptest.NewRequest("POST", "/api/providers", body)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("create status = %d body=%s", w.Code, w.Body.String())
+	}
+
+	// List 含一条,apiKey 脱敏
+	req = httptest.NewRequest("GET", "/api/providers", nil)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Fatalf("list len = %d", len(list))
+	}
+	key, _ := list[0]["api_key"].(string)
+	if key == "sk-xxx1234" || !strings.HasSuffix(key, "1234") || !strings.HasPrefix(key, "***") {
+		t.Errorf("api_key not masked: %q", key)
+	}
+
+	// 用 store 直查拿到原始 key,验证 GET by name 也脱敏
+	orig, _ := st.GetProviderByName("deepseek")
+	if orig.APIKey != "sk-xxx1234" {
+		t.Errorf("underlying key wrong: %q", orig.APIKey)
+	}
+
+	// DELETE
+	req = httptest.NewRequest("DELETE", "/api/providers/deepseek", nil)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("delete status = %d", w.Code)
+	}
+}

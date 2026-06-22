@@ -32,6 +32,8 @@ func New(s *store.Store, staticDir string) *Server {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/games", s.handleGamesList)
 	s.mux.HandleFunc("/api/games/", s.handleGameDetail) // 末尾斜杠匹配子路径
+	s.mux.HandleFunc("/api/providers", s.handleProviders)
+	s.mux.HandleFunc("/api/providers/", s.handleProviderByName)
 	if s.staticDir != "" {
 		// /static/* 直接映射到 staticDir 下文件
 		fs := http.FileServer(http.Dir(s.staticDir))
@@ -117,4 +119,97 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": fmt.Sprintf("%v", err)})
+}
+
+// maskedKey 把 apiKey 脱敏成 "***1234"(后 4 位)。
+func maskedKey(key string) string {
+	if len(key) <= 4 {
+		return "***"
+	}
+	return "***" + key[len(key)-4:]
+}
+
+// providerJSON 是 HTTP 返回的 provider 结构(apiKey 脱敏)。
+type providerJSON struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"` // 脱敏
+}
+
+func toProviderJSON(p store.ProviderCfg) providerJSON {
+	return providerJSON{ID: p.ID, Name: p.Name, Kind: p.Kind, BaseURL: p.BaseURL, APIKey: maskedKey(p.APIKey)}
+}
+
+// handleProviders: GET 列表(脱敏),POST upsert。
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		list, err := s.store.ListProviders()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		out := make([]providerJSON, 0, len(list))
+		for _, p := range list {
+			out = append(out, toProviderJSON(p))
+		}
+		writeJSON(w, http.StatusOK, out)
+
+	case http.MethodPost:
+		var body struct {
+			Name    string `json:"name"`
+			Kind    string `json:"kind"`
+			BaseURL string `json:"base_url"`
+			APIKey  string `json:"api_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+			return
+		}
+		if body.Name == "" || body.Kind == "" || body.BaseURL == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("name, kind, base_url required"))
+			return
+		}
+		p, err := s.store.UpsertProvider(body.Name, body.Kind, body.BaseURL, body.APIKey)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, toProviderJSON(*p))
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleProviderByName: GET 单查(脱敏),DELETE 删除。
+func (s *Server) handleProviderByName(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/providers/")
+	if name == "" || strings.Contains(name, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		p, err := s.store.GetProviderByName(name)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if p == nil {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, toProviderJSON(*p))
+	case http.MethodDelete:
+		if err := s.store.DeleteProvider(name); err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
