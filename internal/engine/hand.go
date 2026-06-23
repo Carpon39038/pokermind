@@ -163,7 +163,8 @@ type handState struct {
 	folded     []bool
 	allIn      []bool
 	handID     int
-	deck      *Deck
+	deck       *Deck
+	onEvent    func(Event) // 若非 nil,每次事件产生时同步调用(用于流式观战)
 }
 
 // setupHand 初始化一手牌:扣盲注、发底牌,返回内部状态与初始事件。
@@ -723,7 +724,29 @@ func (st *handState) soleContender() int {
 //
 // button 是按钮位 seat 索引。
 func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int) ([]Event, HandResult) {
+	return PlayHandStreaming(seats, button, cfg, rng, handID, nil)
+}
+
+// PlayHandStreaming 与 PlayHand 相同,但每次产生事件时同步调用 onEvent(若非 nil)。
+// 用于观战端实时收到 action / holes_dealt 等事件,而不是等整手打完。
+// onEvent 可为 nil,此时行为与 PlayHand 完全一致。
+func PlayHandStreaming(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID int, onEvent func(Event)) ([]Event, HandResult) {
 	st, events := setupHand(seats, button, cfg, rng, handID)
+	st.onEvent = onEvent
+	// setupHand 已 emit 盲注 + DealtHole 到 events,这里补发 callback
+	if onEvent != nil {
+		for _, ev := range events {
+			onEvent(ev)
+		}
+	}
+
+	// emit 追加并同步触发 callback。
+	emit := func(ev Event) {
+		events = append(events, ev)
+		if onEvent != nil {
+			onEvent(ev)
+		}
+	}
 
 	finishByFold := func(winner int) ([]Event, HandResult) {
 		// 把本街 bets 并入 pot(弃牌者贡献保留但不争,由 sidepot 处理)
@@ -735,8 +758,8 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 		if winner < len(payouts) {
 			got = payouts[winner]
 		}
-		events = append(events, Event{Type: PotAwarded, Winners: []int{winner}, Amount: got})
-		events = append(events, Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
+		emit(Event{Type: PotAwarded, Winners: []int{winner}, Amount: got})
+		emit(Event{Type: HandFinished, Folded: true, Winners: []int{winner}})
 		return events, HandResult{Winners: []int{winner}, PotWon: got, Folded: true, FinalStacks: append([]int(nil), st.stacks...)}
 	}
 
@@ -746,7 +769,13 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 			return finishByFold(w)
 		}
 
+		prevLen := len(events)
 		events = st.runStreet(events)
+		if onEvent != nil {
+			for _, ev := range events[prevLen:] {
+				onEvent(ev)
+			}
+		}
 
 		// runStreet 后只剩 1 个未弃牌 → fold 结算
 		if w := st.soleContender(); w >= 0 {
@@ -754,12 +783,18 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 		}
 
 		// 若任一方 all-in,跳过决策,翻完剩余 street
+		prevLen = len(events)
 		if st.anyAllIn() {
 			for st.street != Showdown {
 				events = st.advanceStreet(events)
 			}
 		} else {
 			events = st.advanceStreet(events)
+		}
+		if onEvent != nil {
+			for _, ev := range events[prevLen:] {
+				onEvent(ev)
+			}
 		}
 
 		if st.street == Showdown {
@@ -770,8 +805,8 @@ func PlayHand(seats []PlayerSeat, button int, cfg Config, rng *rand.Rand, handID
 			for _, p := range payouts {
 				totalAward += p
 			}
-			events = append(events, Event{Type: PotAwarded, Winners: winners, Amount: totalAward})
-			events = append(events, Event{Type: HandFinished, Winners: winners})
+			emit(Event{Type: PotAwarded, Winners: winners, Amount: totalAward})
+			emit(Event{Type: HandFinished, Winners: winners})
 			// PotWon:报告赢家中最多的(主要赢家)
 			potWon := 0
 			for _, w := range winners {

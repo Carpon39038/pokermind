@@ -315,17 +315,20 @@ func TestMatchesAPI_StartRejectsBadRequests(t *testing.T) {
 	}
 }
 
-func TestMatchStream_NoRunning(t *testing.T) {
+func TestMatchEvents_NoRunning(t *testing.T) {
 	srv, _ := newTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/matches/current/stream", nil)
+	req := httptest.NewRequest("GET", "/api/matches/current/events?since=0", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("status = %d", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "no_running") {
-		t.Errorf("body should contain no_running marker: %q", body)
+	if !strings.Contains(body, `"running":false`) {
+		t.Errorf("body should report running:false: %q", body)
+	}
+	if !strings.Contains(body, `"events":null`) && !strings.Contains(body, `"events":[]`) {
+		t.Errorf("body should have empty events: %q", body)
 	}
 }

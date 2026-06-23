@@ -28,6 +28,15 @@ type Server struct {
 
 	liveMu sync.Mutex
 	live   *liveMatch
+
+	thinkingEvents chan thinkingHint // wrapper 写入,forwardThinking 转发到 live
+}
+
+// thinkingHint 是 wrapper 给 server 的轻量提示,server 拿到后包装成完整 LiveEvent。
+type thinkingHint struct {
+	seat   int
+	model  string
+	street string
 }
 
 type liveMatch struct {
@@ -35,14 +44,21 @@ type liveMatch struct {
 	cancel    context.CancelFunc
 	startedAt time.Time
 	subsMu    sync.Mutex
-	subs      map[chan match.LiveEvent]struct{}
-	done      chan struct{} // RunLive 结束后关闭
+	history   []match.LiveEvent // 已发出的事件,轮询端按 since 切片读
+	curHand   int               // 最近一次 hand_started 的 hand 编号,供 thinking 事件填值
+	done      chan struct{}     // RunLive 结束后关闭
 }
 
 // New 构造一个 Server。staticDir 是前端静态文件目录(绝对或相对路径)。
 // 传入空串则不服务静态文件(纯 API 模式,便于测试)。
 func New(s *store.Store, staticDir string) *Server {
-	srv := &Server{store: s, staticDir: staticDir, mux: http.NewServeMux()}
+	srv := &Server{
+		store:          s,
+		staticDir:      staticDir,
+		mux:            http.NewServeMux(),
+		thinkingEvents: make(chan thinkingHint, 256),
+	}
+	go srv.forwardThinking()
 	srv.routes()
 	return srv
 }
@@ -55,7 +71,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/providers/", s.handleProviderByName)
 	s.mux.HandleFunc("/api/matches", s.handleMatchesStart)
 	s.mux.HandleFunc("/api/matches/current", s.handleMatchCurrent)
-	s.mux.HandleFunc("/api/matches/current/stream", s.handleMatchStream)
+	s.mux.HandleFunc("/api/matches/current/events", s.handleMatchEvents)
 	s.mux.HandleFunc("/api/matches/current/stop", s.handleMatchStop)
 	if s.staticDir != "" {
 		// /static/* 直接映射到 staticDir 下文件
@@ -247,9 +263,15 @@ func (s *Server) handleMatchesStart(w http.ResponseWriter, r *http.Request) {
 
 	s.liveMu.Lock()
 	if s.live != nil {
-		s.liveMu.Unlock()
-		writeError(w, http.StatusConflict, fmt.Errorf("a match is already running"))
-		return
+		// 若上一局已结束(done 已关闭),清掉它允许开新局
+		select {
+		case <-s.live.done:
+			s.live = nil
+		default:
+			s.liveMu.Unlock()
+			writeError(w, http.StatusConflict, fmt.Errorf("a match is already running"))
+			return
+		}
 	}
 	s.liveMu.Unlock()
 
@@ -288,7 +310,7 @@ func (s *Server) handleMatchesStart(w http.ResponseWriter, r *http.Request) {
 	httpClient := providers.DefaultHTTPClient(0)
 	var specs []match.PlayerSpec
 	var makePlayers []func() engine.Player
-	for _, seat := range body.Seats {
+	for i, seat := range body.Seats {
 		pcfg, err := s.store.GetProviderByName(seat.Provider)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("lookup provider %q: %w", seat.Provider, err))
@@ -307,13 +329,15 @@ func (s *Server) handleMatchesStart(w http.ResponseWriter, r *http.Request) {
 			Model:    seat.Model,
 			Label:    fmt.Sprintf("%s:%s", seat.Provider, seat.Model),
 		})
+		seatIdx := i
 		kind, baseURL, apiKey, model := pcfg.Kind, pcfg.BaseURL, pcfg.APIKey, seat.Model
 		makePlayers = append(makePlayers, func() engine.Player {
 			p, err := providers.ByKind(kind, baseURL, apiKey, httpClient)
 			if err != nil {
 				return newPanicPlayer(err)
 			}
-			return &players.LLMPlayer{Provider: p, Model: model}
+			inner := &players.LLMPlayer{Provider: p, Model: model}
+			return &thinkingWrapper{seat: seatIdx, model: model, inner: inner, notify: s.thinkingEvents}
 		})
 	}
 
@@ -331,7 +355,6 @@ func (s *Server) handleMatchesStart(w http.ResponseWriter, r *http.Request) {
 		id:        matchID,
 		cancel:    cancel,
 		startedAt: time.Now(),
-		subs:      map[chan match.LiveEvent]struct{}{},
 		done:      make(chan struct{}),
 	}
 	lm := s.live
@@ -360,7 +383,7 @@ func (s *Server) runLiveAndDistribute(
 		if r := recover(); r != nil {
 			ev := match.LiveEvent{Type: match.EvError}
 			ev.Payload, _ = json.Marshal(map[string]any{"error": fmt.Sprintf("panic: %v", r)})
-			s.broadcast(lm, ev)
+			s.appendEvent(lm, ev)
 		}
 	}()
 
@@ -373,27 +396,26 @@ func (s *Server) runLiveAndDistribute(
 	}()
 
 	for ev := range out {
-		s.broadcast(lm, ev)
+		s.appendEvent(lm, ev)
 	}
 	<-doneRun
 
-	s.liveMu.Lock()
-	if s.live == lm {
-		s.live = nil
-	}
-	s.liveMu.Unlock()
+	// 不立即把 s.live 置 nil:保留 history 让前端在 match_finished 之后还能拉到剩余事件。
+	// 下一次 handleMatchesStart 会检测 lm.done 已关闭 → 清掉旧的 lm → 开新局。
 }
 
-// broadcast 把 ev 非阻塞地发给所有订阅者;sub 满则丢事件。
-func (s *Server) broadcast(lm *liveMatch, ev match.LiveEvent) {
+// appendEvent 把 ev 追加到 lm.history。前端通过 /api/matches/current/events?since=N 轮询读取。
+// 若 ev 是 hand_started,同步更新 lm.curHand。
+func (s *Server) appendEvent(lm *liveMatch, ev match.LiveEvent) {
 	lm.subsMu.Lock()
-	defer lm.subsMu.Unlock()
-	for ch := range lm.subs {
-		select {
-		case ch <- ev:
-		default:
-		}
+	lm.history = append(lm.history, ev)
+	if ev.Type == match.EvHandStarted {
+		// 解析 payload 拿 hand 编号
+		var p struct{ Hand int `json:"hand"` }
+		_ = json.Unmarshal(ev.Payload, &p)
+		lm.curHand = p.Hand
 	}
+	lm.subsMu.Unlock()
 }
 
 // handleMatchCurrent: GET /api/matches/current
@@ -409,11 +431,17 @@ func (s *Server) handleMatchCurrent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"running": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"running":    true,
-		"match_id":   lm.id,
-		"started_at": lm.startedAt.Format(time.RFC3339),
-	})
+	// lm 存在但 done 已关闭 → 上局已结束,waiting for 下次开新局
+	select {
+	case <-lm.done:
+		writeJSON(w, http.StatusOK, map[string]any{"running": false, "match_id": lm.id})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"running":    true,
+			"match_id":   lm.id,
+			"started_at": lm.startedAt.Format(time.RFC3339),
+		})
+	}
 }
 
 // handleMatchStop: POST /api/matches/current/stop
@@ -429,78 +457,67 @@ func (s *Server) handleMatchStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("no running match"))
 		return
 	}
+	select {
+	case <-lm.done:
+		writeError(w, http.StatusNotFound, fmt.Errorf("match already finished"))
+		return
+	default:
+	}
 	lm.cancel()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelling"})
 }
 
-// handleMatchStream: GET /api/matches/current/stream  (SSE)
+// handleMatchEvents: GET /api/matches/current/events?since=<seq>
 //
-//	若无 running match,写一条 event: no_running 后关闭。
-//	若有,订阅 live.subs,逐条写 event:<type>\ndata:<json>\n\n。
-//	客户端断开或 done 后关闭。
-func (s *Server) handleMatchStream(w http.ResponseWriter, r *http.Request) {
+//	从 lm.history 返回 seq > since 的所有事件。
+//	若没有 running match,返回 running:false + 空 events(前端据此停止轮询)。
+//	若 match 已结束但 lm 还在(history 未被清),仍可返回剩余事件 + running:false。
+//
+// seq 是 history 切片的索引(0-based)。客户端首次用 since=0 拉全部,
+// 之后用上次返回的 next_since 继续追。
+func (s *Server) handleMatchEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
+	sinceStr := r.URL.Query().Get("since")
+	since, _ := strconv.Atoi(sinceStr)
+	if since < 0 {
+		since = 0
 	}
 
 	s.liveMu.Lock()
 	lm := s.live
 	s.liveMu.Unlock()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	resp := struct {
+		Running    bool                `json:"running"`
+		MatchID    string              `json:"match_id,omitempty"`
+		NextSince  int                 `json:"next_since"`
+		Events     []match.LiveEvent   `json:"events"`
+	}{}
 
-	if lm == nil {
-		_, _ = fmt.Fprintf(w, "event: no_running\ndata: {}\n\n")
-		flusher.Flush()
-		return
-	}
-
-	sub := make(chan match.LiveEvent, 256)
-	lm.subsMu.Lock()
-	lm.subs[sub] = struct{}{}
-	lm.subsMu.Unlock()
-
-	defer func() {
+	if lm != nil {
 		lm.subsMu.Lock()
-		delete(lm.subs, sub)
-		lm.subsMu.Unlock()
-	}()
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-lm.done:
-			for {
-				select {
-				case ev := <-sub:
-					writeSSE(w, ev)
-					flusher.Flush()
-				default:
-					return
-				}
-			}
-		case ev := <-sub:
-			writeSSE(w, ev)
-			flusher.Flush()
+	hist := lm.history
+		if since > len(hist) {
+			since = len(hist)
 		}
+		newEvts := append([]match.LiveEvent(nil), hist[since:]...)
+		resp.Events = newEvts
+		resp.NextSince = len(hist)
+		running := true
+		select {
+		case <-lm.done:
+			running = false
+		default:
+		}
+		resp.Running = running
+		resp.MatchID = lm.id
+		lm.subsMu.Unlock()
 	}
-}
 
-// writeSSE 写一个 SSE 帧:event: <type>\ndata: <json>\n\n
-func writeSSE(w http.ResponseWriter, ev match.LiveEvent) {
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, ev.Payload)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // panicPlayer 用于 provider 工厂失败时占位,Decide 直接 fold。
@@ -510,4 +527,45 @@ func newPanicPlayer(err error) *panicPlayer { return &panicPlayer{err: err} }
 
 func (p *panicPlayer) Decide(obs engine.Observation) engine.Action {
 	return engine.Action{Type: engine.Fold}
+}
+
+// thinkingWrapper 包装一个 LLMPlayer,在 Decide 入口前给 server 发 hint。
+// server 负责把 hint 包装成 thinking 事件并填入当前 hand 编号。
+type thinkingWrapper struct {
+	seat   int
+	model  string
+	inner  engine.Player
+	notify chan<- thinkingHint
+}
+
+func (w *thinkingWrapper) Decide(obs engine.Observation) engine.Action {
+	select {
+	case w.notify <- thinkingHint{seat: w.seat, model: w.model, street: obs.Street.String()}:
+	default:
+	}
+	return w.inner.Decide(obs)
+}
+
+// forwardThinking 把 hint 包装成 thinking LiveEvent,append 到当前 live 的 history。
+// hand 编号取自 lm.curHand(由 hand_started 事件更新)。
+func (s *Server) forwardThinking() {
+	for hint := range s.thinkingEvents {
+		s.liveMu.Lock()
+		lm := s.live
+		s.liveMu.Unlock()
+		if lm == nil {
+			continue
+		}
+		lm.subsMu.Lock()
+		hand := lm.curHand
+		lm.subsMu.Unlock()
+		ev := match.LiveEvent{Type: match.EvThinking}
+		ev.Payload, _ = json.Marshal(struct {
+			Hand   int    `json:"hand"`
+			Seat   int    `json:"seat"`
+			Model  string `json:"model"`
+			Street string `json:"street"`
+		}{Hand: hand, Seat: hint.seat, Model: hint.model, Street: hint.street})
+		s.appendEvent(lm, ev)
+	}
 }

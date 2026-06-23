@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -53,6 +54,7 @@ Rules:
 
 // Decide 实现 engine.Player。
 func (p *LLMPlayer) Decide(obs engine.Observation) engine.Action {
+	log.Printf("[llm] Decide ENTER model=%s street=%s tocall=%d", p.Model, obs.Street, obs.ToCall)
 	maxRetries := p.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = defaultMaxRetries
@@ -67,6 +69,7 @@ func (p *LLMPlayer) Decide(obs engine.Observation) engine.Action {
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		t0 := time.Now()
 		text, err := p.Provider.ChatComplete(ctx, providers.ChatRequest{
 			Model: p.Model,
 			Messages: []providers.Message{
@@ -77,16 +80,20 @@ func (p *LLMPlayer) Decide(obs engine.Observation) engine.Action {
 			Temperature:        0.7,
 		})
 		cancel()
+		elapsed := time.Since(t0).Round(time.Millisecond)
 		if err != nil {
+			log.Printf("[llm] model=%s attempt=%d elapsed=%s err=%v", p.Model, attempt, elapsed, err)
 			lastErr = fmt.Errorf("attempt %d provider: %w", attempt, err)
 			continue
 		}
 
 		decision, err := parseDecision(text)
 		if err != nil {
+			log.Printf("[llm] model=%s attempt=%d elapsed=%s parse_err=%v text=%q", p.Model, attempt, elapsed, err, truncate(text, 200))
 			lastErr = fmt.Errorf("attempt %d parse: %w", attempt, err)
 			continue
 		}
+		log.Printf("[llm] model=%s attempt=%d elapsed=%s ok action=%s amount=%d", p.Model, attempt, elapsed, decision.Action.Type, decision.Action.Amount)
 
 		action, err := validateDecision(decision, obs)
 		if err != nil {

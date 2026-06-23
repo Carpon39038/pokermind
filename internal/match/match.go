@@ -414,12 +414,15 @@ type LiveEvent struct {
 
 // LiveEvent 类型常量。
 const (
-	EvMatchStarted  = "match_started"
-	EvHandStarted   = "hand_started"
-	EvAction        = "action"
-	EvHandFinished  = "hand_finished"
-	EvMatchFinished = "match_finished"
-	EvError         = "error"
+	EvMatchStarted    = "match_started"
+	EvHandStarted     = "hand_started"     // 一手开始(button 已定),底牌尚未发
+	EvHolesDealt      = "holes_dealt"      // 底牌发出
+	EvThinking        = "thinking"         // 某 seat 开始思考(LLM 调用前)
+	EvAction          = "action"
+	EvCommunityUpdate = "community_update" // 公共牌更新(flop/turn/river)
+	EvHandFinished    = "hand_finished"
+	EvMatchFinished   = "match_finished"
+	EvError           = "error"
 )
 
 type liveSeatInfo struct {
@@ -443,9 +446,13 @@ type liveHole struct {
 }
 
 type handStartedPayload struct {
-	Hand   int        `json:"hand"`
-	Button int        `json:"button"`
-	Holes  []liveHole `json:"holes"`
+	Hand   int `json:"hand"`
+	Button int `json:"button"`
+}
+
+type holesDealtPayload struct {
+	Hand  int        `json:"hand"`
+	Holes []liveHole `json:"holes"`
 }
 
 type actionPayload struct {
@@ -462,6 +469,13 @@ type actionPayload struct {
 	HandStr    float64 `json:"hand_strength,omitempty"`
 	EstEquity  float64 `json:"estimated_equity,omitempty"`
 	IsBluffing bool    `json:"is_bluffing,omitempty"`
+}
+
+type thinkingPayload struct {
+	Hand   int    `json:"hand"`
+	Seat   int    `json:"seat"`
+	Model  string `json:"model"`
+	Street string `json:"street"`
 }
 
 type handFinishedPayload struct {
@@ -569,6 +583,10 @@ func RunLive(
 		}
 
 		button := (h - 1) % n
+		// 先 emit hand_started(底牌还没发),让前端立刻知道「第 h 手开始、button 是谁」
+		// 这样后续的 thinking 事件才有正确的 hand 上下文。
+		emitLive(out, LiveEvent{Type: EvHandStarted, Payload: mustPayload(handStartedPayload{Hand: h, Button: button})})
+
 		seats := make([]engine.PlayerSeat, n)
 		for i := 0; i < n; i++ {
 			seats[i] = engine.PlayerSeat{
@@ -577,10 +595,11 @@ func RunLive(
 				Player: makePlayers[i](),
 			}
 		}
-		events, result := engine.PlayHand(seats, button, cfg, rng, h)
+		// 用 PlayHandStreaming 实时 emit 每个事件(holes_dealt/action/hand_finished 等)
+		// 这样观战端能逐动作看到,而不是等整手打完才批量收到。
+		streamCb := makeStreamCallback(out, h, specs)
+		events, result := engine.PlayHandStreaming(seats, button, cfg, rng, h, streamCb)
 		stacks = result.FinalStacks
-
-		emitHandEvents(out, events, h, button, specs, result)
 
 		if rec != nil {
 			hr := translateHand(h, button, events, result, playerIDs)
@@ -669,31 +688,14 @@ func RunLive(
 	return out2, nil
 }
 
-// emitHandEvents 从 engine events 抽出 hand_started / action / hand_finished 推送。
-func emitHandEvents(out chan<- LiveEvent, events []engine.Event, hand int, button int, specs []PlayerSpec, result engine.HandResult) {
-	hs := handStartedPayload{Hand: hand, Button: button}
-	handStartedSent := false
-
-	sendHandStarted := func() {
-		if handStartedSent {
-			return
-		}
-		handStartedSent = true
-		emitLive(out, LiveEvent{Type: EvHandStarted, Payload: mustPayload(hs)})
-	}
-
-	// 先收集本手所有公共牌,便于 hand_finished 使用
-	var communityCards []string
-	for _, ev := range events {
-		if ev.Type == engine.StreetAdvanced {
-			for _, c := range ev.Cards {
-				communityCards = append(communityCards, c.String())
-			}
-		}
-	}
-
+// makeStreamCallback 返回一个 engine 流式回调,把每个 engine.Event 实时翻译成 LiveEvent 发到 out。
+// 只处理前端关心的几类:DealtHole(累积后发 holes_dealt)、ActionTaken、StreetAdvanced(更新 community)、HandFinished。
+// BlindPosted / PotAwarded 暂不转发(前端不显示)。
+func makeStreamCallback(out chan<- LiveEvent, hand int, specs []PlayerSpec) func(engine.Event) {
+	var holes []liveHole
+	var community []string
 	seq := 0
-	for _, ev := range events {
+	return func(ev engine.Event) {
 		switch ev.Type {
 		case engine.DealtHole:
 			if ev.Seat >= 0 && ev.Seat < len(specs) {
@@ -701,13 +703,32 @@ func emitHandEvents(out chan<- LiveEvent, events []engine.Event, hand int, butto
 				for _, c := range ev.Cards {
 					cards = append(cards, c.String())
 				}
-				hs.Holes = append(hs.Holes, liveHole{Seat: ev.Seat, Cards: cards})
+				holes = append(holes, liveHole{Seat: ev.Seat, Cards: cards})
+				// engine 一次性发 N 个 DealtHole,我们累积;每收到一个就尝试 emit,
+				// 但只 emit 一次(用 holes 长度判)—— 简化:每次 DealtHole 都重发完整 holes,
+				// 前端覆盖渲染。但这样会有 N 次重复。改成只在长度 == len(specs) 时发。
+				if len(holes) == len(specs) {
+					emitLive(out, LiveEvent{
+						Type:    EvHolesDealt,
+						Payload: mustPayload(holesDealtPayload{Hand: hand, Holes: holes}),
+					})
+				}
 			}
-			sendHandStarted()
+		case engine.StreetAdvanced:
+			for _, c := range ev.Cards {
+				community = append(community, c.String())
+			}
+			emitLive(out, LiveEvent{
+				Type: EvCommunityUpdate,
+				Payload: mustPayload(struct {
+					Hand      int      `json:"hand"`
+					Street    string   `json:"street"`
+					Community []string `json:"community"`
+				}{Hand: hand, Street: ev.Street.String(), Community: community}),
+			})
 		case engine.ActionTaken:
-			sendHandStarted()
 			if ev.Action == nil {
-				continue
+				return
 			}
 			ap := actionPayload{
 				Hand:       hand,
@@ -731,16 +752,17 @@ func emitHandEvents(out chan<- LiveEvent, events []engine.Event, hand int, butto
 			seq++
 			emitLive(out, LiveEvent{Type: EvAction, Payload: mustPayload(ap)})
 		case engine.HandFinished:
-			sendHandStarted()
 			winners := append([]int(nil), ev.Winners...)
-			hf := handFinishedPayload{
-				Hand:      hand,
-				Winners:   winners,
-				Community: communityCards,
-				Pot:       result.PotWon,
-				Folded:    ev.Folded,
-			}
-			emitLive(out, LiveEvent{Type: EvHandFinished, Payload: mustPayload(hf)})
+			emitLive(out, LiveEvent{
+				Type: EvHandFinished,
+				Payload: mustPayload(handFinishedPayload{
+					Hand:      hand,
+					Winners:   winners,
+					Community: community,
+					Pot:       0, // 流式回调拿不到 PotWon,这里发 0,RunLive 结束后可用 result.PotWon 校正(简化:前端用最终 stacks 不需要 pot)
+					Folded:    ev.Folded,
+				}),
+			})
 		}
 	}
 }
@@ -754,6 +776,17 @@ func emitLive(out chan<- LiveEvent, ev LiveEvent) {
 	case out <- ev:
 	default:
 	}
+}
+
+// EmitThinking 给外部(server 的 thinkingWrapper)用,发 thinking 事件。
+// hand/seat/model 由调用方提供。非阻塞,满则丢。
+func EmitThinking(out chan<- LiveEvent, hand, seat int, model, street string) {
+	emitLive(out, LiveEvent{
+		Type: EvThinking,
+		Payload: mustPayload(thinkingPayload{
+			Hand: hand, Seat: seat, Model: model, Street: street,
+		}),
+	})
 }
 
 // mustPayload 把 v marshal 成 RawMessage,失败时用 error payload。

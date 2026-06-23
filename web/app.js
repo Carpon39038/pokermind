@@ -442,95 +442,233 @@ function renderLiveWatch(matchID) {
         <h2 style="margin:0">现场观战 <small id="match-progress"></small></h2>
         <button id="stop-btn">停止对局</button>
       </header>
-      <div class="poker-table" id="table"></div>
-      <div class="community" id="community"></div>
-      <div class="pot" id="pot">底池: 0</div>
+      <div class="table" id="live-table">
+        <div class="street-badge" id="street-badge">等待发牌…</div>
+        <div class="seats-ring" id="seats-ring"></div>
+        <div class="community-area">
+          <div class="community-cards" id="community"></div>
+          <div class="pot">底池 <span class="amount" id="pot">0</span></div>
+        </div>
+      </div>
       <ul class="action-log" id="log"></ul>
     </section>
   `;
 
   let totalHands = 0;
-  const seats = {}; // seat -> {label, stack, bet, hole, folded, winner}
+  let currentHand = 0;
+  let buttonSeat = -1;
+  let since = -1; // -1 表示尚未初始化,首次 pollOnce 会跳过 replay
+  let pollTimer = null;
+  const seats = {};
 
   document.getElementById('stop-btn').onclick = async () => {
     if (!confirm('停止当前对局?(不会落库)')) return;
     await fetch('/api/matches/current/stop', {method: 'POST'});
   };
 
-  const es = new EventSource('/api/matches/current/stream');
-  es.addEventListener("no_running", () => {
-    document.getElementById('log').innerHTML += `<li class="sys">没有正在运行的对局</li>`;
-    es.close();
-  });
-  es.addEventListener("match_started", e => {
-    const d = JSON.parse(e.data);
-    totalHands = d.hands;
-    renderTable(d.seats);
-  });
-  es.addEventListener("hand_started", e => {
-    const d = JSON.parse(e.data);
-    document.getElementById('match-progress').textContent = `第 ${d.hand}/${totalHands} 手`;
-    Object.values(seats).forEach(s => { s.bet = 0; s.folded = false; s.winner = false; });
-    for (const h of (d.holes || [])) {
-      if (seats[h.seat]) seats[h.seat].hole = h.cards;
-    }
-    refreshView();
-  });
-  es.addEventListener("action", e => {
-    const d = JSON.parse(e.data);
-    const s = seats[d.seat];
-    if (!s) return;
-    let line = `seat${d.seat} ${escapeHtml(d.provider)}:${escapeHtml(d.model)} ${d.action_type.toUpperCase()}`;
-    if (d.action_type === 'raise') line += `-to-${d.amount}`;
-    if (d.has_report) line += ` — "${escapeHtml(d.reasoning)}" (hs=${(d.hand_strength*1).toFixed(2)} eq=${(d.estimated_equity*1).toFixed(2)} bluff=${d.is_bluffing})`;
-    document.getElementById('log').innerHTML += `<li>${line}</li>`;
+  async function startPolling() {
+    // 先拉一次全部历史,做两件事:
+    // 1) 如果对局未在运行且无事件 → 提示 + 退出
+    // 2) 如果在运行,从「最后一个 hand_started」位置开始 replay(避免跳过当前手中间状态),
+    //    但更早的事件(match_started、之前手)也要选择性补放(seats 要 init)。
+    try {
+      const r = await fetch(`/api/matches/current/events?since=0`);
+      const data = await r.json();
+      if (!data.running && (!data.events || data.events.length === 0)) {
+        document.getElementById('log').innerHTML = `<li class="sys">没有正在运行的对局。回 <a href="#/live">#/live</a> 开一局。</li>`;
+        return;
+      }
+      const evs = data.events || [];
+      // 先放 match_started(初始化 seats)
+      const ms = evs.find(e => e.type === 'match_started');
+      if (ms) handleEvent('match_started', ms.payload);
+      // 找最后一个 hand_started,从那以后完整 replay(含该 hand_started)
+      let lastHSIdx = -1;
+      for (let i = evs.length - 1; i >= 0; i--) {
+        if (evs[i].type === 'hand_started') { lastHSIdx = i; break; }
+      }
+      if (lastHSIdx >= 0) {
+        for (let i = lastHSIdx; i < evs.length; i++) {
+          handleEvent(evs[i].type, evs[i].payload);
+        }
+      }
+      since = data.next_since;
+    } catch (e) { /* ignore */ }
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollOnce, 500);
+  }
 
-    if (d.action_type === 'fold') { s.folded = true; }
-    if (d.action_type === 'raise') { s.bet = d.amount; }
-    refreshView();
-  });
-  es.addEventListener("hand_finished", e => {
-    const d = JSON.parse(e.data);
-    document.getElementById('pot').textContent = `底池: ${d.pot}`;
-    document.getElementById('community').innerHTML = (d.community || []).map(renderCard).join('');
-    for (const seat of d.winners) {
-      if (seats[seat]) seats[seat].winner = true;
+  async function pollOnce() {
+    if (since < 0) return;
+    let r;
+    try {
+      r = await fetch(`/api/matches/current/events?since=${since}`);
+    } catch (e) { return; }
+    if (!r.ok) return;
+    let data;
+    try { data = await r.json(); } catch (e) { return; }
+    since = data.next_since;
+    for (const ev of (data.events || [])) {
+      try { handleEvent(ev.type, ev.payload); }
+      catch (e) { console.error('handleEvent', ev, e); }
     }
-    document.getElementById('log').innerHTML += `<li class="sys">第 ${d.hand} 手结束:赢家 seat ${d.winners.join(',')},pot=${d.pot}</li>`;
-    refreshView();
-  });
-  es.addEventListener("match_finished", e => {
-    const d = JSON.parse(e.data);
-    es.close();
-    const summary = d.final_stacks.map((c, i) => `seat${i}=${c}`).join(', ');
-    document.getElementById('log').innerHTML += `<li class="sys">对局结束:赢家 seat ${d.winner_seat},game_id=${d.game_id}<br>${escapeHtml(summary)}</li>`;
-    document.getElementById('stop-btn').disabled = true;
-  });
-  es.addEventListener("error", e => {
-    if (e.data) {
-      document.getElementById('log').innerHTML += `<li class="sys">错误事件:${escapeHtml(e.data)}</li>`;
+    if (!data.running && (!data.events || data.events.length === 0)) {
+      clearInterval(pollTimer);
+      pollTimer = null;
     }
-  });
+  }
+
+  function handleEvent(type, d) {
+    switch (type) {
+      case 'match_started':
+        totalHands = d.hands;
+        renderTable(d.seats);
+        break;
+      case 'hand_started':
+        currentHand = d.hand;
+        buttonSeat = d.button;
+        setStreet('preflop');
+        document.getElementById('match-progress').textContent = `第 ${d.hand}/${totalHands} 手`;
+        document.getElementById('community').innerHTML = '';
+        document.getElementById('pot').textContent = '0';
+        Object.values(seats).forEach(s => { s.bet = 0; s.folded = false; s.winner = false; s.thinking = false; s.hole = []; s.lastAction = null; });
+        appendLog(`<li class="sys">—— 第 ${d.hand} 手开始(Button=seat${d.button})——</li>`);
+        refreshView();
+        break;
+      case 'holes_dealt':
+        for (const h of (d.holes || [])) {
+          if (seats[h.seat]) seats[h.seat].hole = h.cards;
+        }
+        refreshView();
+        break;
+      case 'thinking':
+        // 不再切换 seat 状态:thinking 实际上是 PlayHand 内部实时 emit 的,
+        // 但 holes_dealt 和 action 是 PlayHand 结束后批量 emit,两者时序对不齐。
+        // 改成纯日志,UI 上的「思考中」由 action 之间的间隔自然体现。
+        if (seats[d.seat]) {
+          appendLog(`<li class="thinking">第 ${currentHand} 手 · seat${d.seat} ${escapeHtml(d.model)} 思考中… (${escapeHtml(d.street)})</li>`);
+        }
+        break;
+      case 'action': {
+        const s = seats[d.seat];
+        if (!s) break;
+        s.thinking = false;
+        const hs = (typeof d.hand_strength === 'number') ? d.hand_strength.toFixed(2) : null;
+        const eq = (typeof d.estimated_equity === 'number') ? d.estimated_equity.toFixed(2) : null;
+        s.lastAction = {
+          type: d.action_type,
+          amount: d.amount,
+          street: d.street,
+          reasoning: d.reasoning || '',
+          hasReport: !!d.has_report,
+          hs, eq,
+          isBluff: !!d.is_bluffing,
+          ts: Date.now(),
+        };
+        // 历史 log 仍保留(可选)
+        let line = `<strong>seat${d.seat}</strong> <span class="action-type ${escapeHtml(d.action_type)}">${d.action_type.toUpperCase()}</span>`;
+        if (d.action_type === 'raise') line += ` → ${d.amount}`;
+        if (d.has_report) line += ` <em>“${escapeHtml(d.reasoning || '')}”</em>${hs ? ` <span class="metrics">hs=${hs} eq=${eq}${d.is_bluff ? ' ⚡诈唬' : ''}</span>` : ''}`;
+        appendLog(`<li>${line}</li>`);
+        if (d.action_type === 'fold') s.folded = true;
+        if (d.action_type === 'raise') s.bet = d.amount;
+        setStreet(d.street);
+        refreshView();
+        break;
+      }
+      case 'community_update':
+        document.getElementById('community').innerHTML = (d.community || []).map(renderCard).join('');
+        setStreet(d.street);
+        break;
+      case 'hand_finished':
+        if (d.pot) document.getElementById('pot').textContent = d.pot;
+        if (d.community && d.community.length > 0) {
+          document.getElementById('community').innerHTML = d.community.map(renderCard).join('');
+        }
+        for (const seat of d.winners) {
+          if (seats[seat]) seats[seat].winner = true;
+        }
+        appendLog(`<li class="sys">第 ${d.hand} 手结束 · 赢家 seat ${d.winners.join(',')} · ${d.folded ? '弃牌' : '摊牌'}</li>`);
+        refreshView();
+        break;
+      case 'match_finished': {
+        const summary = d.final_stacks.map((c, i) => `seat${i}=${c}`).join(', ');
+        appendLog(`<li class="sys">对局结束 · 赢家 seat ${d.winner_seat} · game_id=${d.game_id}<br>${escapeHtml(summary)}</li>`);
+        document.getElementById('stop-btn').disabled = true;
+        break;
+      }
+      case 'error':
+        if (d && d.error) appendLog(`<li class="sys">错误:${escapeHtml(d.error)}</li>`);
+        break;
+    }
+  }
+
+  startPolling();
+
+  function setStreet(name) {
+    document.getElementById('street-badge').textContent = name;
+  }
+
+  function appendLog(html) {
+    const log = document.getElementById('log');
+    log.insertAdjacentHTML('beforeend', html);
+    log.scrollTop = log.scrollHeight;
+  }
 
   function renderTable(seatList) {
-    const tbl = document.getElementById('table');
-    tbl.innerHTML = seatList.map(s => {
-      seats[s.seat] = {label: `${s.provider}:${s.model}`, stack: 0, bet: 0, hole: [], folded: false, winner: false};
+    const ring = document.getElementById('seats-ring');
+    ring.innerHTML = seatList.map(s => {
+      seats[s.seat] = {
+        label: `${s.provider}:${s.model}`,
+        provider: s.provider, model: s.model,
+        stack: 0, bet: 0, hole: [], folded: false, winner: false, thinking: false,
+      };
       return `<div class="seat" id="seat-${s.seat}"></div>`;
     }).join('');
     refreshView();
   }
+
   function refreshView() {
-    for (const [id, s] of Object.entries(seats)) {
-      const el = document.getElementById('seat-' + id);
+    const n = Object.keys(seats).length;
+    for (const [idStr, s] of Object.entries(seats)) {
+      const el = document.getElementById('seat-' + idStr);
       if (!el) continue;
-      const holeHtml = (s.hole || []).map(renderCard).join('') || '<span class="hint">—</span>';
+      const id = parseInt(idStr, 10);
+      el.classList.toggle('active', !!s.thinking);
+      el.classList.toggle('seat-winner', !!s.winner);
+      el.classList.toggle('folded', !!s.folded);
+
+      // 位置标签
+      let posTag = 'UTG';
+      if (n === 2) {
+        posTag = id === buttonSeat ? 'SB · BTN' : 'BB';
+      } else if (buttonSeat >= 0) {
+        if (id === buttonSeat) posTag = 'BTN';
+        else if (id === (buttonSeat + 1) % n) posTag = 'SB';
+        else if (id === (buttonSeat + 2) % n) posTag = 'BB';
+      }
+      const holeStr = (s.hole || []).join(' ');
+      const holeHtml = renderCards(holeStr);
+
+      // 状态行:思考中 > 最后动作 > 空闲
+      let statusHtml = '';
+      if (s.thinking) {
+        statusHtml = `<span class="seat-status thinking">🤔 思考中…</span>`;
+      } else if (s.lastAction) {
+        const a = s.lastAction;
+        const typeTxt = a.type.toUpperCase() + (a.type === 'raise' ? `→${a.amount}` : '');
+        const reportTxt = a.hasReport
+          ? `<span class="seat-reasoning">“${escapeHtml(a.reasoning)}”</span>${a.hs ? `<span class="metrics">hs=${a.hs} eq=${a.eq}${a.isBluff ? ' ⚡' : ''}</span>` : ''}`
+          : '';
+        statusHtml = `<span class="seat-status"><span class="action-type ${escapeHtml(a.type)}">${typeTxt}</span></span>${reportTxt}`;
+      }
+
       el.innerHTML = `
-        <div class="seat-name">${escapeHtml(s.label)}</div>
-        <div class="seat-stack">本手投入: ${s.bet}</div>
-        <div class="cards-row">${holeHtml}</div>
-        ${s.folded ? '<div class="flag">FOLD</div>' : ''}
-        ${s.winner ? '<div class="flag win">WIN</div>' : ''}
+        <span class="seat-name">${escapeHtml(s.label)}</span>
+        <span class="seat-pos">${posTag}</span>
+        <span class="seat-cards">${holeHtml}</span>
+        <span class="seat-stack">${s.bet > 0 ? `投入 ${s.bet}` : ''}</span>
+        <div class="seat-status-wrap">${statusHtml}</div>
       `;
     }
   }
